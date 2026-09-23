@@ -3,6 +3,11 @@
 const Account = require('./account.model');
 const buildCrudService = require('../shared/crud.service');
 const { cleanString } = require('../../utils/normalize');
+const {
+  applyBusinessUnitFilter,
+  assertBusinessUnitAccess,
+  hasBusinessUnitAccess
+} = require('../shared/leadLineAccess');
 
 function normalizeAccount(payload, current) {
   const name = cleanString(payload.name || current?.name);
@@ -26,14 +31,27 @@ function normalizeAccount(payload, current) {
 }
 
 module.exports = buildCrudService(Account, {
-  buildFilter(query) {
+  buildFilter(query, { req }) {
     const filter = {};
-    if (query.businessUnit) filter.businessUnit = query.businessUnit;
+    applyBusinessUnitFilter(filter, req.user, query.businessUnit);
     if (query.type) filter.type = query.type;
     if (query.country) filter.country = query.country;
     if (query.q) filter.name = { $regex: query.q, $options: 'i' };
     return filter;
   },
-  beforeCreate: normalizeAccount,
-  beforeUpdate: normalizeAccount
+  beforeCreate(payload, { req }) {
+    assertBusinessUnitAccess(req.user, payload.businessUnit);
+    return normalizeAccount(payload);
+  },
+  beforeUpdate(payload, current, { req }) {
+    assertBusinessUnitAccess(req.user, current.businessUnit);
+    assertBusinessUnitAccess(req.user, payload.businessUnit || current.businessUnit);
+    return normalizeAccount(payload, current);
+  },
+  canRead(item, { req }) {
+    return hasBusinessUnitAccess(req.user, item.businessUnit);
+  },
+  canWrite(item, { req }) {
+    return hasBusinessUnitAccess(req.user, item.businessUnit);
+  }
 });

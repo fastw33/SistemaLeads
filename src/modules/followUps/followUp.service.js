@@ -8,9 +8,10 @@ const CampaignRecord = require('../campaigns/campaignRecord.model');
 const CampaignQueue = require('../campaignQueue/campaignQueue.model');
 const buildCrudService = require('../shared/crud.service');
 const { isAdminUser } = require('../../middlewares/auth.middleware');
+const { allowedBusinessUnits, hasBusinessUnitAccess } = require('../shared/leadLineAccess');
 
 const baseService = buildCrudService(FollowUp, {
-  buildFilter(query, { req }) {
+  async buildFilter(query, { req }) {
     const filter = {};
     if (isAdminUser(req.user)) {
       if (query.assignedAdvisorId) {
@@ -26,16 +27,26 @@ const baseService = buildCrudService(FollowUp, {
       ];
     }
     if (query.status) filter.status = query.status;
-    if (query.leadId) filter.leadId = query.leadId;
+    const allowedLeadIds = await Lead.distinct('_id', {
+      businessUnit: { $in: allowedBusinessUnits(req.user) }
+    });
+    filter.leadId = query.leadId && allowedLeadIds.some((id) => String(id) === String(query.leadId))
+      ? query.leadId
+      : { $in: query.leadId ? [] : allowedLeadIds };
     return filter;
   },
   async canRead(item, { req }) {
-    return isAdminUser(req.user) ||
+    const lead = await Lead.findById(item.leadId).select('businessUnit').lean();
+    return Boolean(lead && hasBusinessUnitAccess(req.user, lead.businessUnit)) && (
+      isAdminUser(req.user) ||
       item.assignedAdvisorId === req.user.id ||
-      (item.participants || []).some((participant) => participant.personalId === req.user.id);
+      (item.participants || []).some((participant) => participant.personalId === req.user.id)
+    );
   },
   async canWrite(item, { req }) {
-    return isAdminUser(req.user) || item.assignedAdvisorId === req.user.id;
+    const lead = await Lead.findById(item.leadId).select('businessUnit').lean();
+    return Boolean(lead && hasBusinessUnitAccess(req.user, lead.businessUnit)) &&
+      (isAdminUser(req.user) || item.assignedAdvisorId === req.user.id);
   }
 });
 
@@ -84,8 +95,13 @@ async function campaignAgendaItems(query, req) {
     : String(req.user.id || '');
   if (!advisorId) return [];
 
+  const allowedCampaignIds = await Campaign.distinct('_id', {
+    businessUnit: { $in: allowedBusinessUnits(req.user) }
+  });
+
   const queueItems = await CampaignQueue.find({
     assignedAdvisorId: advisorId,
+    campaignId: { $in: allowedCampaignIds },
     $or: [
       { status: 'rescheduled', availableAt: { $ne: null } },
       { status: 'worked', lastOutcome: { $in: ['follow_up_completed', 'follow_up_cancelled'] } }

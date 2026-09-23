@@ -11,6 +11,14 @@ const counterService = require('../counters/counter.service');
 const { actorFromReq } = require('../shared/schema.helpers');
 const { httpError } = require('../shared/errors');
 const { normalizePhone, normalizeEmail } = require('../../utils/normalize');
+const { allowedBusinessUnits, assertBusinessUnitAccess } = require('../shared/leadLineAccess');
+
+async function assertQueueBusinessUnit(queueItem, user) {
+  const campaign = await Campaign.findById(queueItem.campaignId).select('businessUnit').lean();
+  if (!campaign) throw httpError(404, 'Campaña no encontrada');
+  assertBusinessUnitAccess(user, campaign.businessUnit);
+  return campaign;
+}
 
 async function createOpportunityLead(queueItem, req) {
   const [record, campaign] = await Promise.all([
@@ -19,6 +27,7 @@ async function createOpportunityLead(queueItem, req) {
   ]);
 
   if (!record || !campaign) throw httpError(404, 'Registro de campana no encontrado');
+  assertBusinessUnitAccess(req.user, campaign.businessUnit);
 
   const phones = [...new Set(
     (record.detectedFields.phones?.length
@@ -96,9 +105,13 @@ async function createOpportunityLead(queueItem, req) {
 }
 
 async function currentForAdvisor(req) {
+  const campaignIds = await Campaign.distinct('_id', {
+    businessUnit: { $in: allowedBusinessUnits(req.user) }
+  });
   const queueItem = await CampaignQueue.findOne({
     assignedAdvisorId: req.user.id,
-    status: 'assigned'
+    status: 'assigned',
+    campaignId: { $in: campaignIds }
   }).sort({ updatedAt: -1 }).lean();
   if (!queueItem) return { item: null, message: 'No tienes un prospecto activo' };
   const [record, campaign, lead] = await Promise.all([
@@ -106,6 +119,7 @@ async function currentForAdvisor(req) {
     Campaign.findById(queueItem.campaignId).lean(),
     queueItem.leadId ? Lead.findById(queueItem.leadId).lean() : null
   ]);
+  assertBusinessUnitAccess(req.user, campaign?.businessUnit);
   return { item: queueItem, record, campaign, lead };
 }
 
@@ -126,6 +140,7 @@ async function enrich(queueId, payload, req) {
     queueItem.leadId ? Lead.findById(queueItem.leadId) : null
   ]);
   if (!record || !campaign) throw httpError(404, 'Registro de campaña no encontrado');
+  assertBusinessUnitAccess(req.user, campaign.businessUnit);
 
   const configuredEditable = new Set(
     (campaign.fieldConfiguration || [])
@@ -220,6 +235,7 @@ async function finishEnrichment(queueId, payload, req) {
   if (queueItem.assignedAdvisorId !== req.user.id) {
     throw httpError(403, 'Este prospecto no está asignado a tu usuario');
   }
+  await assertQueueBusinessUnit(queueItem, req.user);
   let record = await CampaignRecord.findById(queueItem.campaignRecordId);
   if (!record) throw httpError(404, 'Registro de campaña no encontrado');
   const result = ['ready', 'no_answer', 'follow_up', 'not_interested', 'no_contact', 'manual_review'].includes(payload.result)
@@ -289,6 +305,7 @@ async function resolveFollowUp(queueId, payload, req) {
   if (queueItem.assignedAdvisorId !== req.user.id) {
     throw httpError(403, 'Este seguimiento no está asignado a tu usuario');
   }
+  await assertQueueBusinessUnit(queueItem, req.user);
   if (queueItem.status !== 'rescheduled') {
     throw httpError(409, 'Este seguimiento ya fue resuelto');
   }
@@ -378,7 +395,10 @@ async function nextForAdvisor(req, filters = {}) {
     { status: 'paused', pausedUntil: { $lte: now } },
     { $set: { status: 'active' }, $unset: { pausedUntil: 1 } }
   );
-  const campaignFilter = { status: 'active' };
+  const campaignFilter = {
+    status: 'active',
+    businessUnit: { $in: allowedBusinessUnits(req.user) }
+  };
   if (filters.campaignId) campaignFilter._id = filters.campaignId;
   const activeCampaignIds = await Campaign.distinct('_id', campaignFilter);
   const query = {
@@ -409,6 +429,7 @@ async function nextForAdvisor(req, filters = {}) {
     CampaignRecord.findById(queueItem.campaignRecordId)
   ]);
   if (!campaign || !record) throw httpError(404, 'Registro de campaña no encontrado');
+  assertBusinessUnitAccess(req.user, campaign.businessUnit);
 
   queueItem.status = 'assigned';
   queueItem.assignedAdvisorId = req.user.id;
@@ -439,6 +460,7 @@ async function complete(queueId, payload, req) {
   const queueItem = await CampaignQueue.findById(queueId);
   if (!queueItem) throw httpError(404, 'Item de cola no encontrado');
   if (queueItem.assignedAdvisorId !== req.user.id) throw httpError(403, 'Este contacto no esta asignado a tu usuario');
+  await assertQueueBusinessUnit(queueItem, req.user);
   if (!payload.outcome) throw httpError(400, 'Resultado requerido');
 
   const event = await LeadEvent.create({

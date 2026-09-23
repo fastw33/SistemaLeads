@@ -5,6 +5,7 @@ const multer = require('multer');
 const controller = require('./lead.controller');
 const validator = require('./lead.validator');
 const validate = require('../../middlewares/validate');
+const { requirePermission } = require('../../middlewares/authorization.middleware');
 
 const router = express.Router();
 const upload = multer({
@@ -64,10 +65,10 @@ router.get('/intelligence', controller.contactIntelligence);
 router.get('/attachments/:attachmentId/download', controller.downloadAttachment);
 router.post('/manual', upload.any(), controller.createManual);
 router.post('/operations/lot-created', validator.validateLotOperation, validate, controller.registerLotOperation);
-router.get('/:id/admin/events', validator.validateId, validate, controller.adminEvents);
-router.patch('/:id/admin/events/:eventId', validator.validateAdminEventUpdate, validate, controller.adminUpdateEvent);
-router.patch('/:id/admin', validator.validateAdminUpdate, validate, controller.adminUpdate);
-router.delete('/:id/admin', validator.validateAdminDelete, validate, controller.adminDelete);
+router.get('/:id/admin/events', requirePermission('esAdmin'), validator.validateId, validate, controller.adminEvents);
+router.patch('/:id/admin/events/:eventId', requirePermission('esAdmin'), validator.validateAdminEventUpdate, validate, controller.adminUpdateEvent);
+router.patch('/:id/admin', requirePermission('esAdmin'), validator.validateAdminUpdate, validate, controller.adminUpdate);
+router.delete('/:id/admin', requirePermission('esAdmin'), validator.validateAdminDelete, validate, controller.adminDelete);
 router.post('/:id/assign', validator.validateAssign, validate, controller.assign);
 router.post('/:id/discard', validator.validateDiscard, validate, controller.discard);
 router.post('/:id/actions', upload.any(), validator.validateAction, validate, controller.registerAction);

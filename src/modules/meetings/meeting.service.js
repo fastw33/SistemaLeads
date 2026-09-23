@@ -8,11 +8,11 @@ const buildCrudService = require('../shared/crud.service');
 const { actorFromReq } = require('../shared/schema.helpers');
 const { httpError } = require('../shared/errors');
 const { isAdminUser } = require('../../middlewares/auth.middleware');
+const { allowedBusinessUnits, hasBusinessUnitAccess } = require('../shared/leadLineAccess');
 
 module.exports = buildCrudService(Meeting, {
   buildFilter(query, { req }) {
     const filter = {};
-    if (query.leadId) filter.leadId = query.leadId;
     if (query.status) filter.status = query.status;
     if (isAdminUser(req.user)) {
       if (query.advisorId) {
@@ -27,11 +27,21 @@ module.exports = buildCrudService(Meeting, {
         { 'attendees.personalId': req.user.id }
       ];
     }
-    return filter;
+    return Lead.distinct('_id', {
+      businessUnit: { $in: allowedBusinessUnits(req.user) }
+    }).then((allowedLeadIds) => {
+      filter.leadId = query.leadId && allowedLeadIds.some((id) => String(id) === String(query.leadId))
+        ? query.leadId
+        : { $in: query.leadId ? [] : allowedLeadIds };
+      return filter;
+    });
   },
   async beforeCreate(payload, { req }) {
     const lead = await Lead.findById(payload.leadId).lean();
     if (!lead) throw httpError(404, 'Lead no encontrado');
+    if (!hasBusinessUnitAccess(req.user, lead.businessUnit)) {
+      throw httpError(403, 'No autorizado para gestionar esta linea comercial');
+    }
     if (!isAdminUser(req.user) && lead.assignedAdvisorId !== req.user.id) {
       throw httpError(403, 'No autorizado para agendar reunion sobre este lead');
     }
@@ -67,11 +77,16 @@ module.exports = buildCrudService(Meeting, {
     };
   },
   async canRead(item, { req }) {
-    return isAdminUser(req.user) ||
+    const lead = await Lead.findById(item.leadId).select('businessUnit').lean();
+    return Boolean(lead && hasBusinessUnitAccess(req.user, lead.businessUnit)) && (
+      isAdminUser(req.user) ||
       item.advisorId === req.user.id ||
-      (item.attendees || []).some((attendee) => attendee.personalId === req.user.id);
+      (item.attendees || []).some((attendee) => attendee.personalId === req.user.id)
+    );
   },
   async canWrite(item, { req }) {
-    return isAdminUser(req.user) || item.advisorId === req.user.id;
+    const lead = await Lead.findById(item.leadId).select('businessUnit').lean();
+    return Boolean(lead && hasBusinessUnitAccess(req.user, lead.businessUnit)) &&
+      (isAdminUser(req.user) || item.advisorId === req.user.id);
   }
 });

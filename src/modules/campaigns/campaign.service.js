@@ -24,16 +24,23 @@ const {
   normalizePhone
 } = require('../../utils/normalize');
 const { sanitizeMongoKeys } = require('../../utils/mongoSafe');
+const {
+  allowedBusinessUnits,
+  applyBusinessUnitFilter,
+  assertBusinessUnitAccess,
+  hasBusinessUnitAccess
+} = require('../shared/leadLineAccess');
 
 const crud = buildCrudService(Campaign, {
-  buildFilter(query) {
+  buildFilter(query, { req }) {
     const filter = {};
     if (query.status) filter.status = query.status;
-    if (query.businessUnit) filter.businessUnit = query.businessUnit;
+    applyBusinessUnitFilter(filter, req.user, query.businessUnit);
     if (query.serviceLine) filter.serviceLine = query.serviceLine;
     return filter;
   },
   async beforeCreate(payload, { req }) {
+    assertBusinessUnitAccess(req.user, payload.businessUnit);
     const startsAt = new Date(payload.startsAt);
     const endsAt = new Date(payload.endsAt);
     if (endsAt < startsAt) {
@@ -48,6 +55,17 @@ const crud = buildCrudService(Campaign, {
       code: payload.code || await counterService.nextCode('HC-CAMP'),
       createdBy: actorFromReq(req)
     };
+  },
+  async canRead(item, { req }) {
+    return hasBusinessUnitAccess(req.user, item.businessUnit);
+  },
+  async canWrite(item, { req }) {
+    return hasBusinessUnitAccess(req.user, item.businessUnit);
+  },
+  async beforeUpdate(payload, current, { req }) {
+    assertBusinessUnitAccess(req.user, current.businessUnit);
+    assertBusinessUnitAccess(req.user, payload.businessUnit || current.businessUnit);
+    return payload;
   }
 });
 
@@ -70,6 +88,7 @@ async function startCampaign(campaignId, req) {
     error.statusCode = 404;
     throw error;
   }
+  assertBusinessUnitAccess(req.user, campaign.businessUnit);
   if (campaign.status === 'closed') {
     const error = new Error('Una campaña detenida no puede volver a iniciarse');
     error.statusCode = 409;
@@ -124,6 +143,7 @@ async function pauseCampaign(campaignId, pausedUntil, req) {
     error.statusCode = 404;
     throw error;
   }
+  assertBusinessUnitAccess(req.user, campaign.businessUnit);
   if (campaign.status !== 'active') {
     const error = new Error('Solo una campaña activa puede pausarse');
     error.statusCode = 409;
@@ -155,6 +175,7 @@ async function stopCampaign(campaignId, req) {
     error.statusCode = 404;
     throw error;
   }
+  assertBusinessUnitAccess(req.user, campaign.businessUnit);
   if (campaign.status === 'closed') return campaign.toObject();
 
   campaign.status = 'closed';
@@ -179,13 +200,14 @@ function escapeRegex(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-async function listContacts(campaignId, query = {}) {
-  const campaign = await Campaign.findById(campaignId).select('_id').lean();
+async function listContacts(campaignId, query = {}, req) {
+  const campaign = await Campaign.findById(campaignId).select('_id businessUnit').lean();
   if (!campaign) {
     const error = new Error('Campaña no encontrada');
     error.statusCode = 404;
     throw error;
   }
+  assertBusinessUnitAccess(req.user, campaign.businessUnit);
   const page = Math.max(Number(query.page || 1), 1);
   const limit = Math.min(Math.max(Number(query.limit || 25), 1), 2000);
   const filter = { campaignId };
@@ -310,11 +332,13 @@ async function assignContact(campaignId, recordId, payload = {}, req) {
   const reason = cleanString(payload.reason);
   if (!advisorId || !advisorName) throw httpError(400, 'Selecciona el asesor responsable');
   if (reason.length < 5) throw httpError(400, 'Indica el motivo de la asignación');
-  const [record, queue] = await Promise.all([
+  const [campaign, record, queue] = await Promise.all([
+    Campaign.findById(campaignId).select('businessUnit').lean(),
     CampaignRecord.findOne({ _id: recordId, campaignId }),
     CampaignQueue.findOne({ campaignRecordId: recordId, campaignId })
   ]);
-  if (!record || !queue) throw httpError(404, 'Contacto de campaña no encontrado');
+  if (!campaign || !record || !queue) throw httpError(404, 'Contacto de campaña no encontrado');
+  assertBusinessUnitAccess(req.user, campaign.businessUnit);
   if (record.leadId) throw httpError(409, 'Este contacto ya se convirtió en lead; reasígnalo desde la pestaña de Leads');
 
   const previousAdvisorId = queue.assignedAdvisorId || '';
@@ -356,6 +380,7 @@ async function deleteContact(campaignId, recordId, reasonValue, req) {
     CampaignQueue.findOne({ campaignRecordId: recordId, campaignId }).lean()
   ]);
   if (!campaign || !record) throw httpError(404, 'Contacto de campaña no encontrado');
+  assertBusinessUnitAccess(req.user, campaign.businessUnit);
 
   await auditService.record(req, {
     action: 'campaign.contact.delete',
@@ -415,14 +440,23 @@ function performanceGroup(includeCampaign = false) {
   };
 }
 
-async function operatorPerformance(query = {}) {
+async function operatorPerformance(query = {}, req) {
   const { from, to } = performanceDateRange(query);
   const scope = ['all', 'campaigns', 'leads'].includes(query.scope) ? query.scope : 'all';
   const selectedCampaignId = query.campaignId && mongoose.isValidObjectId(query.campaignId)
     ? new mongoose.Types.ObjectId(query.campaignId)
     : null;
-  const recordMatch = {};
-  if (selectedCampaignId) recordMatch.campaignId = selectedCampaignId;
+  const permittedCampaignIds = await Campaign.distinct('_id', {
+    businessUnit: { $in: allowedBusinessUnits(req.user) }
+  });
+  const selectedCampaignAllowed = selectedCampaignId && permittedCampaignIds.some(
+    (campaignId) => String(campaignId) === String(selectedCampaignId)
+  );
+  const recordMatch = {
+    campaignId: selectedCampaignId
+      ? { $in: selectedCampaignAllowed ? [selectedCampaignId] : [] }
+      : { $in: permittedCampaignIds }
+  };
   const historyMatch = {
     'changeHistory.changedAt': { $gte: from, $lte: to },
     'changeHistory.actorId': { $nin: [null, ''] },
@@ -507,6 +541,7 @@ async function operatorPerformance(query = {}) {
     { $match: leadEventMatch },
     { $lookup: { from: 'leads', localField: 'leadId', foreignField: '_id', as: 'lead' } },
     { $unwind: '$lead' },
+    { $match: { 'lead.businessUnit': { $in: allowedBusinessUnits(req.user) } } },
     ...(selectedCampaignId ? [{ $match: { 'lead.campaignId': selectedCampaignId } }] : [])
   ];
   const opportunityOutcomes = ['interested', 'purchase_completed', 'won', 'quote_created', 'do_created'];
@@ -1038,13 +1073,14 @@ async function validateRows(rows, mapping = {}) {
   });
 }
 
-async function previewRows(campaignId, rows, mappingValue) {
-  const campaign = await Campaign.findById(campaignId).select('_id').lean();
+async function previewRows(campaignId, rows, mappingValue, req) {
+  const campaign = await Campaign.findById(campaignId).select('_id businessUnit').lean();
   if (!campaign) {
     const error = new Error('Campaña no encontrada');
     error.statusCode = 404;
     throw error;
   }
+  assertBusinessUnitAccess(req.user, campaign.businessUnit);
 
   const mapping = parseMapping(mappingValue);
   const validation = await validateRows(rows, mapping);
@@ -1063,6 +1099,7 @@ async function importRows(campaignId, rows, req, fileName = 'json', mapping = {}
     error.statusCode = 404;
     throw error;
   }
+  assertBusinessUnitAccess(req.user, campaign.businessUnit);
 
   const job = await ImportJob.create({
     campaignId,

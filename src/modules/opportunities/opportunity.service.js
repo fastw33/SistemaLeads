@@ -8,12 +8,17 @@ const counterService = require('../counters/counter.service');
 const { actorFromReq } = require('../shared/schema.helpers');
 const { httpError } = require('../shared/errors');
 const { isAdminUser } = require('../../middlewares/auth.middleware');
+const {
+  applyBusinessUnitFilter,
+  assertBusinessUnitAccess,
+  hasBusinessUnitAccess
+} = require('../shared/leadLineAccess');
 
 module.exports = buildCrudService(Opportunity, {
   buildFilter(query, { req }) {
     const filter = {};
     if (query.stage) filter.stage = query.stage;
-    if (query.businessUnit) filter.businessUnit = query.businessUnit;
+    applyBusinessUnitFilter(filter, req.user, query.businessUnit);
     if (query.leadId) filter.leadId = query.leadId;
     if (isAdminUser(req.user)) {
       if (query.assignedAdvisorId) filter.assignedAdvisorId = query.assignedAdvisorId;
@@ -25,6 +30,7 @@ module.exports = buildCrudService(Opportunity, {
   async beforeCreate(payload, { req }) {
     const lead = await Lead.findById(payload.leadId).lean();
     if (!lead) throw httpError(404, 'Lead no encontrado');
+    assertBusinessUnitAccess(req.user, lead.businessUnit);
     if (!isAdminUser(req.user) && lead.assignedAdvisorId !== req.user.id) {
       throw httpError(403, 'No autorizado para crear oportunidad sobre este lead');
     }
@@ -42,13 +48,26 @@ module.exports = buildCrudService(Opportunity, {
     return {
       ...payload,
       code,
+      businessUnit: lead.businessUnit,
+      serviceLine: lead.serviceLine,
       assignedAdvisorId: payload.assignedAdvisorId || req.user.id
     };
   },
+  beforeUpdate(payload, current, { req }) {
+    assertBusinessUnitAccess(req.user, current.businessUnit);
+    return {
+      ...payload,
+      leadId: current.leadId,
+      businessUnit: current.businessUnit,
+      serviceLine: current.serviceLine
+    };
+  },
   async canRead(item, { req }) {
-    return isAdminUser(req.user) || item.assignedAdvisorId === req.user.id;
+    return hasBusinessUnitAccess(req.user, item.businessUnit) &&
+      (isAdminUser(req.user) || item.assignedAdvisorId === req.user.id);
   },
   async canWrite(item, { req }) {
-    return isAdminUser(req.user) || item.assignedAdvisorId === req.user.id;
+    return hasBusinessUnitAccess(req.user, item.businessUnit) &&
+      (isAdminUser(req.user) || item.assignedAdvisorId === req.user.id);
   }
 });

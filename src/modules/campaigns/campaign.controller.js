@@ -31,7 +31,7 @@ base.previewImport = asyncHandler(async (req, res) => {
   const effectiveMapping = Object.keys(requestedMapping).length
     ? requestedMapping
     : suggestedMapping;
-  const data = await service.previewRows(req.params.id, parsed.rows, effectiveMapping);
+  const data = await service.previewRows(req.params.id, parsed.rows, effectiveMapping, req);
   return res.json({
     fileName: req.file.originalname,
     headers: parsed.headers,
@@ -74,11 +74,11 @@ base.stop = asyncHandler(async (req, res) => {
 });
 
 base.contacts = asyncHandler(async (req, res) => {
-  res.json(await service.listContacts(req.params.id, req.query));
+  res.json(await service.listContacts(req.params.id, req.query, req));
 });
 
 base.operatorPerformance = asyncHandler(async (req, res) => {
-  res.json(await service.operatorPerformance(req.query));
+  res.json(await service.operatorPerformance(req.query, req));
 });
 
 base.adminContacts = asyncHandler(async (req, res) => {

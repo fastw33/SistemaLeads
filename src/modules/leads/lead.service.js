@@ -20,6 +20,12 @@ const counterService = require('../counters/counter.service');
 const { actorFromReq } = require('../shared/schema.helpers');
 const { isAdminUser } = require('../../middlewares/auth.middleware');
 const { httpError } = require('../shared/errors');
+const {
+  applyBusinessUnitFilter,
+  assertBusinessUnitAccess,
+  hasBusinessUnitAccess,
+  allowedBusinessUnits
+} = require('../shared/leadLineAccess');
 const { getS3Client, uploadLeadFiles } = require('./leadPublic.storage');
 const { sendLeadNotification } = require('./leadPublic.mailer');
 const {
@@ -117,15 +123,7 @@ function canManageLeadInbox(user = {}) {
 }
 
 function canAdministerLeads(user = {}) {
-  if (isAdminUser(user)) return true;
-
-  return [
-    'leadsAdmin',
-    'hubComercialAdmin',
-    'gestionComercialAdmin',
-    'comercial_admin',
-    'leads_admin'
-  ].some((permission) => hasLeadPermission(user, permission));
+  return user.permisos?.esAdmin === true;
 }
 
 function canAccessOwnManualLead(item, user = {}) {
@@ -455,6 +453,7 @@ function priceLabel(price = {}) {
 async function assertCanReadLead(leadId, req) {
   const lead = await Lead.findById(leadId);
   if (!lead) throw httpError(404, 'Lead no encontrado');
+  assertBusinessUnitAccess(req.user, lead.businessUnit);
   if (!canManageLeadInbox(req.user) && String(lead.assignedAdvisorId || '') !== String(req.user?.id || '') && !canAccessOwnManualLead(lead, req.user)) {
     throw httpError(403, 'No autorizado para ver este lead');
   }
@@ -1061,7 +1060,7 @@ const leadCrudService = buildCrudService(Lead, {
         .filter(Boolean);
       filter.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
     }
-    if (query.businessUnit) filter.businessUnit = query.businessUnit;
+    applyBusinessUnitFilter(filter, req.user, query.businessUnit);
     if (query.serviceLine) filter.serviceLine = query.serviceLine;
     if (query.campaignId) filter.campaignId = query.campaignId;
     if (query.q) {
@@ -1089,6 +1088,7 @@ const leadCrudService = buildCrudService(Lead, {
 
   async beforeCreate(payload, { req }) {
     const data = normalizeLead(payload);
+    assertBusinessUnitAccess(req.user, data.businessUnit);
     data.code = await counterService.nextLeadCode(data.businessUnit);
     if (!data.assignedAdvisorId && req.user) {
       data.assignedAdvisorId = req.user.id;
@@ -1097,16 +1097,20 @@ const leadCrudService = buildCrudService(Lead, {
     return data;
   },
 
-  beforeUpdate(payload, current) {
-    return normalizeLead(payload, current);
+  beforeUpdate(payload, current, { req }) {
+    assertBusinessUnitAccess(req.user, current.businessUnit);
+    const data = normalizeLead(payload, current);
+    assertBusinessUnitAccess(req.user, data.businessUnit);
+    return data;
   },
 
   async canRead(item, { req }) {
-    return canManageLeadInbox(req.user) || item.assignedAdvisorId === req.user.id || canAccessOwnManualLead(item, req.user);
+    return hasBusinessUnitAccess(req.user, item.businessUnit) &&
+      (canManageLeadInbox(req.user) || item.assignedAdvisorId === req.user.id || canAccessOwnManualLead(item, req.user));
   },
 
   async canWrite(item, { req }) {
-    return canWriteLead(item, req.user);
+    return hasBusinessUnitAccess(req.user, item.businessUnit) && canWriteLead(item, req.user);
   }
 });
 
@@ -1177,7 +1181,10 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
     );
   }
 
-  let leads = await Lead.find({ $or: leadMatch })
+  let leads = await Lead.find({
+    businessUnit: { $in: allowedBusinessUnits(req.user) },
+    $or: leadMatch
+  })
     .sort({ createdAt: -1 })
     .limit(20)
     .lean();
@@ -1516,6 +1523,7 @@ module.exports.createEvent = async function createEvent(leadId, payload, req) {
 module.exports.registerAction = async function registerAction(leadId, payload = {}, req) {
   const lead = await Lead.findById(leadId);
   if (!lead) throw httpError(404, 'Lead no encontrado');
+  assertBusinessUnitAccess(req.user, lead.businessUnit);
   if (!canWriteLead(lead, req.user)) {
     throw httpError(403, 'No autorizado para gestionar este lead');
   }
@@ -1923,7 +1931,7 @@ module.exports.registerLotOperation = async function registerLotOperation(payloa
       ];
 
   const existing = await Lead.findOne({
-    businessUnit: { $in: ['Harvest', 'Greenway'] },
+    businessUnit: { $in: ['Harvest', 'Greenway'].filter((unit) => hasBusinessUnitAccess(req.user, unit)) },
     status: 'won',
     'customFields.lastOperation.operationType': 'lot',
     'customFields.lastOperation.operationId': lotId,
@@ -1948,7 +1956,7 @@ module.exports.registerLotOperation = async function registerLotOperation(payloa
     'quote_created', 'quote_sent', 'opportunity'
   ];
   const lead = await Lead.findOne({
-    businessUnit: { $in: ['Harvest', 'Greenway'] },
+    businessUnit: { $in: ['Harvest', 'Greenway'].filter((unit) => hasBusinessUnitAccess(req.user, unit)) },
     status: { $in: managedStatuses },
     assignedAdvisorId: { $exists: true, $nin: ['', null] },
     'customFields.crmStartedAt': { $exists: true, $ne: null, $lte: operationAt },
@@ -1960,7 +1968,7 @@ module.exports.registerLotOperation = async function registerLotOperation(payloa
 
   if (!lead) {
     const unstartedLead = await Lead.exists({
-      businessUnit: { $in: ['Harvest', 'Greenway'] },
+      businessUnit: { $in: ['Harvest', 'Greenway'].filter((unit) => hasBusinessUnitAccess(req.user, unit)) },
       status: { $in: ['new', 'queued', 'incomplete', ...managedStatuses] },
       $and: [
         { $or: referenceConditions },
@@ -2343,6 +2351,7 @@ module.exports.adminDeleteLead = async function adminDeleteLead(leadId, payload 
 module.exports.assignLead = async function assignLead(leadId, payload = {}, req) {
   const lead = await Lead.findById(leadId);
   if (!lead) throw httpError(404, 'Lead no encontrado');
+  assertBusinessUnitAccess(req.user, lead.businessUnit);
   if (!canWriteLead(lead, req.user)) {
     throw httpError(403, 'No autorizado para asignar este lead');
   }
@@ -2411,6 +2420,7 @@ module.exports.assignLead = async function assignLead(leadId, payload = {}, req)
 module.exports.discardLead = async function discardLead(leadId, payload = {}, req) {
   const lead = await Lead.findById(leadId);
   if (!lead) throw httpError(404, 'Lead no encontrado');
+  assertBusinessUnitAccess(req.user, lead.businessUnit);
   if (!canWriteLead(lead, req.user)) {
     throw httpError(403, 'No autorizado para descartar este lead');
   }
@@ -2554,6 +2564,7 @@ module.exports.ingestPublicLead = async function ingestPublicLead(req) {
 
 module.exports.createManualLead = async function createManualLead(req) {
   const data = buildManualLeadData(req);
+  assertBusinessUnitAccess(req.user, data.businessUnit);
 
   data.code = await counterService.nextLeadCode(data.businessUnit);
 

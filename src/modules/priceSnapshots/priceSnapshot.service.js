@@ -7,22 +7,27 @@ const buildCrudService = require('../shared/crud.service');
 const { actorFromReq } = require('../shared/schema.helpers');
 const { httpError } = require('../shared/errors');
 const { isAdminUser } = require('../../middlewares/auth.middleware');
+const { allowedBusinessUnits, hasBusinessUnitAccess } = require('../shared/leadLineAccess');
 
 module.exports = buildCrudService(PriceSnapshot, {
   async buildFilter(query, { req }) {
     const filter = {};
-    if (query.leadId) filter.leadId = query.leadId;
     if (query.requestId) filter.requestId = query.requestId;
     if (query.source) filter.source = query.source;
-    if (!isAdminUser(req.user)) {
-      const allowedLeads = await Lead.find({ assignedAdvisorId: req.user.id }).select('_id').lean();
-      filter.leadId = { $in: allowedLeads.map((lead) => lead._id) };
-    }
+    const leadFilter = { businessUnit: { $in: allowedBusinessUnits(req.user) } };
+    if (!isAdminUser(req.user)) leadFilter.assignedAdvisorId = req.user.id;
+    const allowedLeadIds = await Lead.distinct('_id', leadFilter);
+    filter.leadId = query.leadId && allowedLeadIds.some((id) => String(id) === String(query.leadId))
+      ? query.leadId
+      : { $in: query.leadId ? [] : allowedLeadIds };
     return filter;
   },
   async beforeCreate(payload, { req }) {
     const lead = await Lead.findById(payload.leadId).lean();
     if (!lead) throw httpError(404, 'Lead no encontrado');
+    if (!hasBusinessUnitAccess(req.user, lead.businessUnit)) {
+      throw httpError(403, 'No autorizado para gestionar esta linea comercial');
+    }
     if (!isAdminUser(req.user) && lead.assignedAdvisorId !== req.user.id) {
       throw httpError(403, 'No autorizado para registrar precio sobre este lead');
     }
@@ -67,11 +72,13 @@ module.exports = buildCrudService(PriceSnapshot, {
     return data;
   },
   async canRead(item, { req }) {
-    const lead = await Lead.findById(item.leadId).select('assignedAdvisorId').lean();
-    return isAdminUser(req.user) || (lead && lead.assignedAdvisorId === req.user.id);
+    const lead = await Lead.findById(item.leadId).select('assignedAdvisorId businessUnit').lean();
+    return Boolean(lead && hasBusinessUnitAccess(req.user, lead.businessUnit)) &&
+      (isAdminUser(req.user) || lead.assignedAdvisorId === req.user.id);
   },
   async canWrite(item, { req }) {
-    const lead = await Lead.findById(item.leadId).select('assignedAdvisorId').lean();
-    return isAdminUser(req.user) || (lead && lead.assignedAdvisorId === req.user.id);
+    const lead = await Lead.findById(item.leadId).select('assignedAdvisorId businessUnit').lean();
+    return Boolean(lead && hasBusinessUnitAccess(req.user, lead.businessUnit)) &&
+      (isAdminUser(req.user) || lead.assignedAdvisorId === req.user.id);
   }
 });
