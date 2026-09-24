@@ -162,6 +162,13 @@ async function sendLeadNotification({ lead, payload, requestFiles = [], meta = {
   }
 
   if (!transporter || !to) {
+    logger.error('lead_notification_skipped', {
+      leadId: String(lead._id),
+      businessUnit: lead.businessUnit,
+      smtpConfigured: Boolean(transporter),
+      recipientConfigured: Boolean(to),
+    });
+
     return {
       sent: false,
       to: to || '',
@@ -175,7 +182,7 @@ async function sendLeadNotification({ lead, payload, requestFiles = [], meta = {
       process.env.LEADS_MAIL_FROM || process.env.MAIL_FROM || process.env.LEADS_MAIL_USER || process.env.MAIL_USER
     );
     const attachFiles =
-      String(process.env.LEADS_EMAIL_ATTACH_FILES || 'true').toLowerCase() !== 'false';
+      String(process.env.LEADS_EMAIL_ATTACH_FILES || 'false').toLowerCase() === 'true';
 
     await transporter.sendMail({
       from,
@@ -200,6 +207,13 @@ async function sendLeadNotification({ lead, payload, requestFiles = [], meta = {
 
     return { sent: true, to, outboxId: outbox._id, sentAt: outbox.sentAt };
   } catch (error) {
+    logger.error('lead_notification_send_error', {
+      message: error.message,
+      leadId: String(lead._id),
+      businessUnit: lead.businessUnit,
+      attachmentCount: requestFiles.length,
+    });
+
     outbox.status = 'failed';
     outbox.attempts = 1;
     outbox.lastError = error.message;
