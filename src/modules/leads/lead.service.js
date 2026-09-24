@@ -692,7 +692,7 @@ function buildSourceMeta(req) {
 }
 
 function buildPublicLeadData({ payload, meta }) {
-  const detected = inferDetectedFields(mergedPayload);
+  const detected = inferDetectedFields(payload);
   const textForUnit = [
     payload.businessUnit,
     payload.company,
