@@ -27,12 +27,14 @@ async function tracked(system, operation, relatedEntity, fn) {
   }
 }
 
-function searchWmsClients(q) {
-  return tracked('wms', 'search_clients', null, () => wmsClient.searchClients(q));
+function searchWmsClients(q, req) {
+  return tracked('wms', 'search_clients', null, () =>
+    wmsClient.searchClients(q, req.user?.token));
 }
 
-function searchWmsProviders(q) {
-  return tracked('wms', 'search_providers', null, () => wmsClient.searchProviders(q));
+function searchWmsProviders(q, req) {
+  return tracked('wms', 'search_providers', null, () =>
+    wmsClient.searchProviders(q, req.user?.token));
 }
 
 async function latestLocalPrices(req) {

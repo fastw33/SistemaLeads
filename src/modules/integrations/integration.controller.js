@@ -4,11 +4,11 @@ const asyncHandler = require('../../utils/asyncHandler');
 const service = require('./integration.service');
 
 exports.searchWmsClients = asyncHandler(async (req, res) => {
-  res.json(await service.searchWmsClients(req.query.q || ''));
+  res.json(await service.searchWmsClients(req.query.q || '', req));
 });
 
 exports.searchWmsProviders = asyncHandler(async (req, res) => {
-  res.json(await service.searchWmsProviders(req.query.q || ''));
+  res.json(await service.searchWmsProviders(req.query.q || '', req));
 });
 
 exports.latestLocalPrices = asyncHandler(async (req, res) => {
