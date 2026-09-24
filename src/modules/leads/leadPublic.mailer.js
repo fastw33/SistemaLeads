@@ -2,6 +2,7 @@
 
 const nodemailer = require('nodemailer');
 const NotificationOutbox = require('../notifications/notificationOutbox.model');
+const logger = require('../../utils/logger');
 
 let cachedTransporter = null;
 
@@ -25,6 +26,21 @@ function safeJsonParse(value, fallback) {
   } catch (_error) {
     return fallback;
   }
+}
+
+function normalizeRecipient(value) {
+  const values = Array.isArray(value) ? value.flat(Infinity) : [value];
+
+  return values
+    .flatMap((item) => cleanString(item).split(/[;,]/))
+    .map((item) => {
+      const raw = cleanString(item);
+      const mailto = raw.match(/mailto:([^\s)]+)/i);
+      const markdown = raw.match(/\[([^\]]+@[^\]]+)\]/);
+      return cleanString(mailto?.[1] || markdown?.[1] || raw);
+    })
+    .filter(Boolean)
+    .join(', ');
 }
 
 function getTransporter() {
@@ -56,10 +72,12 @@ function resolveLeadRecipient({ pageUrl = '', referer = '', businessUnit = '' } 
   const haystack = [pageUrl, referer, businessUnit].join(' ').toLowerCase();
 
   for (const [pattern, email] of Object.entries(routes)) {
-    if (haystack.includes(String(pattern).toLowerCase())) return email;
+    if (haystack.includes(String(pattern).toLowerCase())) {
+      return normalizeRecipient(email);
+    }
   }
 
-  return defaultEmail;
+  return normalizeRecipient(defaultEmail);
 }
 
 function renderRows(payload = {}) {
@@ -118,16 +136,30 @@ async function sendLeadNotification({ lead, payload, requestFiles = [], meta = {
     businessUnit: lead.businessUnit,
   });
 
-  const outbox = await NotificationOutbox.create({
-    channel: 'email',
-    recipient: { email: to },
-    subject: `Nuevo lead comercial ${lead.code || ''}`.trim(),
-    body: 'Nuevo lead recibido desde formulario web',
-    payload: { leadId: String(lead._id), code: lead.code, meta },
-    status: transporter && to ? 'pending' : 'failed',
-    attempts: 0,
-    lastError: transporter && to ? undefined : 'SMTP o destinatario no configurado',
-  });
+  let outbox;
+  try {
+    outbox = await NotificationOutbox.create({
+      channel: 'email',
+      recipient: { email: to },
+      subject: `Nuevo lead comercial ${lead.code || ''}`.trim(),
+      body: 'Nuevo lead recibido desde formulario web',
+      payload: { leadId: String(lead._id), code: lead.code, meta },
+      status: transporter && to ? 'pending' : 'failed',
+      attempts: 0,
+      lastError: transporter && to ? undefined : 'SMTP o destinatario no configurado',
+    });
+  } catch (error) {
+    logger.error('lead_notification_outbox_error', {
+      message: error.message,
+      leadId: String(lead._id),
+    });
+
+    return {
+      sent: false,
+      to,
+      error: `No se pudo registrar la notificacion: ${error.message}`,
+    };
+  }
 
   if (!transporter || !to) {
     return {
