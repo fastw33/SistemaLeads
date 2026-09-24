@@ -1312,6 +1312,7 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
             : 'contact';
       return {
         type: 'contact',
+        eventId: String(event._id || ''),
         title: event.outcome === 'lead_discarded'
           ? 'Lead descartado'
           : isAssignment
