@@ -8,7 +8,7 @@ const { requirePermission } = require('../../middlewares/authorization.middlewar
 
 const router = express.Router();
 
-router.get('/harvest', requirePermission('leadsConfiguracionPrecios'), requirePermission('leadsHarvest'), controller.getHarvest);
+router.get('/harvest', requirePermission('leadsHarvest'), controller.getHarvest);
 router.patch('/harvest', requirePermission('leadsConfiguracionPrecios'), requirePermission('leadsHarvest'), validator.validateHarvestUpdate, validate, controller.updateHarvest);
 
 module.exports = router;
