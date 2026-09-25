@@ -938,6 +938,50 @@ async function withAttachmentSummary(items) {
   return Array.isArray(items) ? enriched : enriched[0];
 }
 
+function latestPriceManagement(price = {}) {
+  return {
+    outcome: 'price_informed',
+    channel: 'price',
+    note: cleanString(price.notes),
+    material: cleanString(price.material),
+    amount: price.informedPrice ?? price.suggestedPrice ?? null,
+    currency: cleanString(price.currency),
+    unit: cleanString(price.unit),
+    at: price.informedAt || price.createdAt
+  };
+}
+
+async function withLatestPriceSummary(items) {
+  const list = Array.isArray(items) ? items : [items].filter(Boolean);
+  const ids = list.map((item) => item._id).filter(Boolean);
+  if (!ids.length) return items;
+
+  const prices = await PriceSnapshot.find({
+    leadId: { $in: ids },
+    informed: true
+  }).sort({ informedAt: -1, createdAt: -1 }).lean();
+
+  const latestByLead = new Map();
+  prices.forEach((price) => {
+    const key = String(price.leadId || '');
+    if (key && !latestByLead.has(key)) latestByLead.set(key, price);
+  });
+
+  const enriched = list.map((item) => {
+    const price = latestByLead.get(String(item._id || ''));
+    if (!price) return item;
+    return {
+      ...item,
+      customFields: {
+        ...(item.customFields || {}),
+        lastPrice: latestPriceManagement(price)
+      }
+    };
+  });
+
+  return Array.isArray(items) ? enriched : enriched[0];
+}
+
 function buildRecurrenceFilter(lead = {}) {
   const conditions = [];
   const email = lead.emails?.find((item) => item?.normalized)?.normalized;
@@ -1045,7 +1089,9 @@ async function withCommercialClassification(items) {
 }
 
 async function enrichLeadData(data) {
-  const enriched = await withCommercialClassification(await withAttachmentSummary(data));
+  const enriched = await withCommercialClassification(
+    await withLatestPriceSummary(await withAttachmentSummary(data))
+  );
   const addDisplayId = item => item ? { ...item, displayId: operatorLeadId(item) } : item;
   return Array.isArray(enriched) ? enriched.map(addDisplayId) : addDisplayId(enriched);
 }

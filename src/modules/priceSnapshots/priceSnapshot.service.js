@@ -23,7 +23,7 @@ module.exports = buildCrudService(PriceSnapshot, {
     return filter;
   },
   async beforeCreate(payload, { req }) {
-    const lead = await Lead.findById(payload.leadId).lean();
+    const lead = await Lead.findById(payload.leadId);
     if (!lead) throw httpError(404, 'Lead no encontrado');
     if (!hasBusinessUnitAccess(req.user, lead.businessUnit)) {
       throw httpError(403, 'No autorizado para gestionar esta linea comercial');
@@ -33,17 +33,38 @@ module.exports = buildCrudService(PriceSnapshot, {
     }
 
     const hasInformedPrice = payload.informedPrice !== undefined && payload.informedPrice !== null;
+    const informedAt = hasInformedPrice || payload.informed === true ? new Date() : undefined;
+    const actor = actorFromReq(req);
     const data = {
       ...payload,
-      actor: actorFromReq(req),
+      actor,
       informed: hasInformedPrice || payload.informed === true,
-      informedAt: hasInformedPrice || payload.informed === true ? new Date() : undefined
+      informedAt
     };
 
     if (data.informed) {
-      await Lead.findByIdAndUpdate(data.leadId, { status: 'price_informed' });
       const amount = data.informedPrice ?? data.suggestedPrice ?? '';
       const material = String(data.material || '').trim();
+      lead.status = 'price_informed';
+      lead.customFields = {
+        ...(lead.customFields || {}),
+        lastManagedAt: informedAt,
+        lastManagedBy: req.user?.id || '',
+        lastManagedByName: req.user?.name || '',
+        lastPrice: {
+          outcome: 'price_informed',
+          channel: 'price',
+          note: String(data.notes || '').trim(),
+          material,
+          amount,
+          currency: data.currency || '',
+          unit: data.unit || '',
+          at: informedAt
+        }
+      };
+      lead.markModified('customFields');
+      await lead.save();
+
       const priceText = [amount, data.currency, data.unit ? `por ${data.unit}` : '']
         .filter((value) => value !== undefined && value !== null && value !== '')
         .join(' ');
@@ -53,7 +74,7 @@ module.exports = buildCrudService(PriceSnapshot, {
         channel: 'system',
         outcome: data.source,
         notes: `Precio informado${material ? ` para ${material}` : ''}: ${priceText}`.trim(),
-        actor: actorFromReq(req),
+        actor,
         metadata: {
           requestId: data.requestId,
           materialId: data.materialId,
