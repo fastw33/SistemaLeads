@@ -240,7 +240,7 @@ async function listContacts(campaignId, query = {}, req) {
   const [queues, leads, leadEvents] = await Promise.all([
     recordIds.length ? CampaignQueue.find({ campaignRecordId: { $in: recordIds } }).lean() : [],
     leadIds.length ? Lead.find({ _id: { $in: leadIds } })
-      .select('_id code status assignedAdvisorId assignedAdvisorName lastContactAt nextFollowUpAt')
+      .select('_id code name companyName status assignedAdvisorId assignedAdvisorName lastContactAt nextFollowUpAt')
       .lean() : [],
     leadIds.length ? LeadEvent.find({
       leadId: { $in: leadIds },
@@ -251,7 +251,10 @@ async function listContacts(campaignId, query = {}, req) {
       .lean() : []
   ]);
   const queueByRecord = new Map(queues.map((item) => [String(item.campaignRecordId), item]));
-  const leadById = new Map(leads.map((item) => [String(item._id), item]));
+  const leadById = new Map(leads.map((item) => [String(item._id), {
+    ...item,
+    id: String(item._id || '')
+  }]));
   const eventsByRecordCode = leadEvents.reduce((result, event) => {
     const code = event.metadata?.campaignRecordCode;
     if (!code) return result;

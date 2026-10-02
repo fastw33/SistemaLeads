@@ -10,8 +10,68 @@ const auditService = require('../audit/audit.service');
 const counterService = require('../counters/counter.service');
 const { actorFromReq } = require('../shared/schema.helpers');
 const { httpError } = require('../shared/errors');
-const { normalizePhone, normalizeEmail } = require('../../utils/normalize');
+const { cleanString, inferDetectedFields, normalizePhone, normalizeEmail } = require('../../utils/normalize');
 const { allowedBusinessUnits, assertBusinessUnitAccess } = require('../shared/leadLineAccess');
+
+function campaignLeadDisplayId(lead = {}) {
+  const prefixByUnit = {
+    fastway: 'LF',
+    harvest: 'LH',
+    greenway: 'LG'
+  };
+  const unit = cleanString(lead.businessUnit).toLowerCase();
+  const prefix = prefixByUnit[unit] || 'L';
+  const raw = cleanString(lead.sequence) || cleanString(lead.code).split('-').filter(Boolean).pop();
+  const numeric = Number(String(raw || '').replace(/\D/g, ''));
+  return Number.isFinite(numeric) && numeric > 0
+    ? `${prefix}-${numeric}`
+    : `${prefix}-${raw || '-'}`;
+}
+
+function serializeLead(lead) {
+  if (!lead) return null;
+  const item = typeof lead.toObject === 'function' ? lead.toObject() : lead;
+  return {
+    ...item,
+    id: String(item._id || item.id || ''),
+    displayId: campaignLeadDisplayId(item)
+  };
+}
+
+function rawFieldValue(rawData = {}, fieldKey = '') {
+  const key = cleanString(fieldKey);
+  if (!key || !rawData || typeof rawData !== 'object') return '';
+  if (!Object.prototype.hasOwnProperty.call(rawData, key)) return '';
+  const value = rawData[key];
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'object') return '';
+  return cleanString(value);
+}
+
+function leadFieldsFromCampaignRecord(record = {}, options = {}) {
+  const detected = record.detectedFields || {};
+  const inferred = inferDetectedFields(record.rawData || {});
+  const nameSourceField = cleanString(options.nameFieldKey);
+  const selectedName = cleanString(options.nameValue) || rawFieldValue(record.rawData, nameSourceField);
+  const contact = Array.isArray(detected.contacts)
+    ? detected.contacts.find((item) => cleanString(item?.name))
+    : null;
+  const companyName = cleanString(detected.companyName) || cleanString(inferred.companyName);
+  const name = selectedName ||
+    cleanString(detected.name) ||
+    cleanString(contact?.name) ||
+    cleanString(inferred.name) ||
+    companyName ||
+    cleanString(record.code);
+
+  return {
+    name,
+    nameSourceField,
+    companyName: companyName || name,
+    country: cleanString(detected.country) || cleanString(inferred.country),
+    city: cleanString(detected.city)
+  };
+}
 
 async function assertQueueBusinessUnit(queueItem, user) {
   const campaign = await Campaign.findById(queueItem.campaignId).select('businessUnit').lean();
@@ -20,7 +80,7 @@ async function assertQueueBusinessUnit(queueItem, user) {
   return campaign;
 }
 
-async function createOpportunityLead(queueItem, req) {
+async function createOpportunityLead(queueItem, req, options = {}) {
   const [record, campaign] = await Promise.all([
     CampaignRecord.findById(queueItem.campaignRecordId),
     Campaign.findById(queueItem.campaignId).lean()
@@ -28,6 +88,8 @@ async function createOpportunityLead(queueItem, req) {
 
   if (!record || !campaign) throw httpError(404, 'Registro de campana no encontrado');
   assertBusinessUnitAccess(req.user, campaign.businessUnit);
+  record.detectedFields = record.detectedFields || {};
+  const leadFields = leadFieldsFromCampaignRecord(record, options);
 
   const phones = [...new Set(
     (record.detectedFields.phones?.length
@@ -54,14 +116,14 @@ async function createOpportunityLead(queueItem, req) {
   if (!lead) {
     lead = await Lead.create({
       code: await counterService.nextLeadCode(campaign.businessUnit),
-      name: record.detectedFields.name,
-      companyName: record.detectedFields.companyName,
+      name: leadFields.name,
+      companyName: leadFields.companyName,
       businessUnit: campaign.businessUnit,
       serviceLine: campaign.serviceLine,
       accountTypeIntent: campaign.targetAccountType === 'unknown' ? 'unknown' : campaign.targetAccountType,
       status: 'assigned',
-      country: record.detectedFields.country || campaign.country,
-      city: record.detectedFields.city,
+      country: leadFields.country || campaign.country,
+      city: leadFields.city,
       assignedAdvisorId: req.user.id,
       assignedAdvisorName: req.user.name,
       phones: phones.map((phone, index) => ({
@@ -89,6 +151,13 @@ async function createOpportunityLead(queueItem, req) {
       sourcePayload: record.rawData
     });
   } else {
+    if (leadFields.nameSourceField && leadFields.name) {
+      lead.name = leadFields.name;
+    } else if (!cleanString(lead.name) && leadFields.name) {
+      lead.name = leadFields.name;
+    }
+    if (!cleanString(lead.companyName) && leadFields.companyName) lead.companyName = leadFields.companyName;
+    if (!lead.campaignId) lead.campaignId = campaign._id;
     lead.assignedAdvisorId = req.user.id;
     lead.assignedAdvisorName = req.user.name;
     lead.status = lead.status === 'new' || lead.status === 'queued' ? 'assigned' : lead.status;
@@ -99,9 +168,22 @@ async function createOpportunityLead(queueItem, req) {
   }
 
   record.leadId = lead._id;
+  const previousRecordName = cleanString(record.detectedFields.name);
+  record.detectedFields.name = leadFields.name;
+  record.detectedFields.companyName = cleanString(record.detectedFields.companyName) || leadFields.companyName;
+  if (leadFields.nameSourceField && previousRecordName !== leadFields.name) {
+    record.changeHistory.push({
+      fieldKey: 'name',
+      before: previousRecordName,
+      after: leadFields.name,
+      actorId: req.user.id,
+      actorName: req.user.name,
+      note: `Nombre seleccionado desde el campo "${leadFields.nameSourceField}"`
+    });
+  }
   await record.save();
 
-  return { lead: lead.toObject(), campaign, record: record.toObject() };
+  return { lead: serializeLead(lead), campaign, record: record.toObject() };
 }
 
 async function currentForAdvisor(req) {
@@ -120,7 +202,7 @@ async function currentForAdvisor(req) {
     queueItem.leadId ? Lead.findById(queueItem.leadId).lean() : null
   ]);
   assertBusinessUnitAccess(req.user, campaign?.businessUnit);
-  return { item: queueItem, record, campaign, lead };
+  return { item: queueItem, record, campaign, lead: serializeLead(lead) };
 }
 
 const EDITABLE_FIELDS = new Set([
@@ -226,7 +308,7 @@ async function enrich(queueId, payload, req) {
     entityId: record._id,
     metadata: { code: record.code, changedFields: changed.map((item) => item.key) }
   });
-  return { item: queueItem.toObject(), record: record.toObject(), campaign, lead: lead?.toObject() || null };
+  return { item: queueItem.toObject(), record: record.toObject(), campaign, lead: serializeLead(lead) };
 }
 
 async function finishEnrichment(queueId, payload, req) {
@@ -247,7 +329,10 @@ async function finishEnrichment(queueId, payload, req) {
 
   let lead = null;
   if (result === 'ready') {
-    const conversion = await createOpportunityLead(queueItem, req);
+    const conversion = await createOpportunityLead(queueItem, req, {
+      nameFieldKey: payload.nameFieldKey,
+      nameValue: payload.nameValue
+    });
     lead = conversion.lead;
     queueItem.leadId = lead._id;
     record = await CampaignRecord.findById(queueItem.campaignRecordId);

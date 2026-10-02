@@ -24,6 +24,8 @@ const validateFinishEnrichment = [
   body('result').isIn(['ready', 'no_answer', 'follow_up', 'not_interested', 'no_contact', 'manual_review']),
   body('channel').isIn(['phone', 'whatsapp', 'email', 'web', 'research']),
   body('note').isString().trim().notEmpty().isLength({ max: 1000 }),
+  body('nameFieldKey').optional({ nullable: true, checkFalsy: true }).isString().trim().isLength({ max: 240 }),
+  body('nameValue').optional({ nullable: true, checkFalsy: true }).isString().trim().isLength({ max: 240 }),
   body('nextAttemptAt').optional({ nullable: true, checkFalsy: true }).isISO8601()
 ];
 

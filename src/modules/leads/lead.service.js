@@ -1130,7 +1130,11 @@ async function enrichLeadData(data) {
   const enriched = await withCommercialClassification(
     await withLatestPriceSummary(await withAttachmentSummary(data))
   );
-  const addDisplayId = item => item ? { ...item, displayId: operatorLeadId(item) } : item;
+  const addDisplayId = item => item ? {
+    ...item,
+    id: String(item._id || item.id || ''),
+    displayId: operatorLeadId(item)
+  } : item;
   return Array.isArray(enriched) ? enriched.map(addDisplayId) : addDisplayId(enriched);
 }
 
