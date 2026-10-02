@@ -295,6 +295,44 @@ function operatorLabel(value) {
   return OPERATOR_LABELS[raw.toLowerCase()] || raw;
 }
 
+const LEAD_EVENT_CHANNELS = new Set(['phone', 'whatsapp', 'email', 'meeting', 'visit', 'pickup', 'system', 'manual']);
+const LEAD_EVENT_CHANNEL_ALIASES = {
+  llamada: 'phone',
+  celular: 'phone',
+  movil: 'phone',
+  phonecall: 'phone',
+  telefono: 'phone',
+  telefonico: 'phone',
+  whatsapp: 'whatsapp',
+  whatsap: 'whatsapp',
+  wa: 'whatsapp',
+  correo: 'email',
+  correoelectronico: 'email',
+  mail: 'email',
+  reunion: 'meeting',
+  meeting: 'meeting',
+  cita: 'meeting',
+  presencial: 'meeting',
+  presencialmente: 'meeting',
+  presential: 'meeting',
+  inperson: 'meeting',
+  visita: 'visit',
+  visit: 'visit',
+  pickup: 'pickup',
+  recogida: 'pickup',
+  recoleccion: 'pickup',
+  sistema: 'system',
+  system: 'system',
+  manual: 'manual'
+};
+
+function normalizeLeadEventChannel(value) {
+  const raw = cleanString(value).toLowerCase();
+  if (LEAD_EVENT_CHANNELS.has(raw)) return raw;
+
+  return LEAD_EVENT_CHANNEL_ALIASES[normalizeKey(value)] || 'manual';
+}
+
 function operatorDateLabel(value) {
   const date = value ? new Date(value) : null;
   if (!date || Number.isNaN(date.getTime())) return '';
@@ -1162,6 +1200,7 @@ const leadCrudService = buildCrudService(Lead, {
 
 module.exports = {
   ...leadCrudService,
+  normalizeLeadEventChannel,
 
   async list(query = {}, context = {}) {
     const data = await leadCrudService.list(query, context);
@@ -2643,7 +2682,7 @@ module.exports.createManualLead = async function createManualLead(req) {
   await LeadEvent.create({
     leadId: lead._id,
     type: data.assignedAdvisorId ? 'assignment' : 'imported',
-    channel: data.customFields.sourceChannel || 'manual',
+    channel: normalizeLeadEventChannel(data.customFields.sourceChannel),
     outcome: data.assignedAdvisorId ? 'lead_manual_asignado' : 'lead_manual_recibido',
     notes: data.customFields.description || 'Lead creado manualmente desde recepcion',
     actor: actorFromReq(req),
