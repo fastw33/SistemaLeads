@@ -114,6 +114,7 @@ const validateAdminEventUpdate = [
 ];
 
 module.exports = {
+  validateReviewResolve: [objectIdParam(), param('reviewId').isMongoId()],
   validateCreate,
   validateAssign,
   validateDiscard,

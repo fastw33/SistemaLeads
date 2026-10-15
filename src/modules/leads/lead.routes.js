@@ -61,6 +61,7 @@ router.post(
 );
 
 router.get('/', controller.list);
+router.get('/tracking', controller.tracking);
 router.get('/intelligence', controller.contactIntelligence);
 router.get('/attachments/:attachmentId/download', controller.downloadAttachment);
 router.post('/manual', upload.any(), controller.createManual);
@@ -72,6 +73,9 @@ router.delete('/:id/admin', requirePermission('esAdmin'), validator.validateAdmi
 router.post('/:id/assign', validator.validateAssign, validate, controller.assign);
 router.post('/:id/discard', validator.validateDiscard, validate, controller.discard);
 router.post('/:id/actions', upload.any(), validator.validateAction, validate, controller.registerAction);
+router.get('/:id/reviews', validator.validateId, validate, controller.listReviews);
+router.post('/:id/reviews', validator.validateId, validate, controller.createReview);
+router.patch('/:id/reviews/:reviewId/resolve', validator.validateReviewResolve, validate, controller.resolveReview);
 router.get('/:id', validator.validateId, validate, controller.getById);
 router.post('/', validator.validateCreate, validate, controller.create);
 router.patch('/:id', validator.validateId, validate, controller.update);

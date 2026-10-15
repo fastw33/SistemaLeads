@@ -4,6 +4,8 @@ const { DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const mongoose = require('mongoose');
 const Lead = require('./lead.model');
 const LeadEvent = require('../leadEvents/leadEvent.model');
+const LeadReview = require('./leadReview.model');
+const { dateBounds, pagination, trackingPipeline } = require('./leadTracking');
 const Attachment = require('../attachments/attachment.model');
 const Campaign = require('../campaigns/campaign.model');
 const CampaignRecord = require('../campaigns/campaignRecord.model');
@@ -124,6 +126,10 @@ function canManageLeadInbox(user = {}) {
 
 function canAdministerLeads(user = {}) {
   return user.permisos?.esAdmin === true;
+}
+
+function canReadTeamLeads(user = {}) {
+  return canManageLeadInbox(user) || hasLeadPermission(user, 'leadsSeguimiento');
 }
 
 function canAccessOwnManualLead(item, user = {}) {
@@ -492,7 +498,7 @@ async function assertCanReadLead(leadId, req) {
   const lead = await Lead.findById(leadId);
   if (!lead) throw httpError(404, 'Lead no encontrado');
   assertBusinessUnitAccess(req.user, lead.businessUnit);
-  if (!canManageLeadInbox(req.user) && String(lead.assignedAdvisorId || '') !== String(req.user?.id || '') && !canAccessOwnManualLead(lead, req.user)) {
+  if (!canReadTeamLeads(req.user) && String(lead.assignedAdvisorId || '') !== String(req.user?.id || '') && !canAccessOwnManualLead(lead, req.user)) {
     throw httpError(403, 'No autorizado para ver este lead');
   }
   return lead;
@@ -1165,7 +1171,7 @@ const leadCrudService = buildCrudService(Lead, {
     if (query.scope === 'mine') {
       if (!req.user?.id) throw httpError(401, 'Usuario sin id_personal');
       filter.assignedAdvisorId = String(req.user.id);
-    } else if (canManageLeadInbox(req.user)) {
+    } else if (canReadTeamLeads(req.user)) {
       if (query.assignedAdvisorId) filter.assignedAdvisorId = query.assignedAdvisorId;
     } else {
       applyLeadVisibilityFilter(filter, req);
@@ -1194,7 +1200,7 @@ const leadCrudService = buildCrudService(Lead, {
 
   async canRead(item, { req }) {
     return hasBusinessUnitAccess(req.user, item.businessUnit) &&
-      (canManageLeadInbox(req.user) || item.assignedAdvisorId === req.user.id || canAccessOwnManualLead(item, req.user));
+      (canReadTeamLeads(req.user) || item.assignedAdvisorId === req.user.id || canAccessOwnManualLead(item, req.user));
   },
 
   async canWrite(item, { req }) {
@@ -1219,12 +1225,66 @@ module.exports = {
   }
 };
 
+module.exports.tracking = async function tracking(query = {}, req) {
+  const filter = {};
+  applyBusinessUnitFilter(filter, req.user, query.businessUnit);
+  if (!canReadTeamLeads(req.user)) applyLeadVisibilityFilter(filter, req);
+  if (query.q) {
+    const search = escapeRegex(query.q);
+    const searchFilter = { $or: ['code', 'name', 'companyName', 'phones.normalized', 'emails.normalized'].map(field => ({ [field]: { $regex: search, $options: 'i' } })) };
+    filter.$and = [...(filter.$and || []), searchFilter];
+  }
+  const [result] = await Lead.aggregate(trackingPipeline(filter, query));
+  const { page, limit } = pagination(query);
+  const total = result?.total?.[0]?.total || 0;
+  const views = Object.fromEntries((result?.views || []).map(item => [item._id, item.total]));
+  views.all = Object.values(views).reduce((sum, count) => sum + count, 0);
+  const metrics = Object.fromEntries((result?.metrics || []).map(item => [item._id, item.total]));
+  return {
+    items: result?.items || [], total, page, limit, pages: Math.ceil(total / limit), views,
+    metrics: { ...metrics, total, won: result?.closures?.[0]?.won || 0, operations: result?.closures?.[0]?.operations || 0 },
+    advisors: (result?.advisors || []).map(item => ({ id: item._id || 'unassigned', name: item.name || (item._id ? item._id : 'Sin asesor') }))
+  };
+};
+
+module.exports.listReviews = async function listReviews(leadId, req) {
+  await assertCanReadLead(leadId, req);
+  return LeadReview.find({ leadId }).sort({ createdAt: -1, _id: -1 }).lean();
+};
+
+module.exports.createReview = async function createReview(leadId, payload, req) {
+  const lead = await assertCanReadLead(leadId, req);
+  if (!canReadTeamLeads(req.user)) throw httpError(403, 'No autorizado para registrar indicaciones de supervisión');
+  if (!lead.assignedAdvisorId) throw httpError(400, 'Asigna un asesor antes de registrar una indicación');
+  const note = cleanString(payload.note);
+  const dueAt = new Date(payload.dueAt);
+  if (!note || note.length > 4000 || Number.isNaN(dueAt.getTime())) throw httpError(400, 'Escribe la indicación y una fecha límite válida');
+  return LeadReview.create({ leadId, note, dueAt, assignedAdvisorId: lead.assignedAdvisorId,
+    assignedAdvisorName: lead.assignedAdvisorName || '', createdBy: actorFromReq(req) });
+};
+
+module.exports.resolveReview = async function resolveReview(leadId, reviewId, payload, req) {
+  await assertCanReadLead(leadId, req);
+  const review = await LeadReview.findOne({ _id: reviewId, leadId });
+  if (!review) throw httpError(404, 'Indicación no encontrada');
+  if (!canReadTeamLeads(req.user) && String(review.assignedAdvisorId) !== String(req.user.id)) throw httpError(403, 'No autorizado para resolver esta indicación');
+  const resolution = cleanString(payload.resolution);
+  if (!resolution || resolution.length > 4000) throw httpError(400, 'Describe cómo se atendió la indicación (máximo 4000 caracteres)');
+  if (review.status === 'resolved') return review;
+  const updated = await LeadReview.findOneAndUpdate({ _id: reviewId, leadId, status: 'pending' }, {
+    $set: { status: 'resolved', resolution, resolvedAt: new Date(), resolvedBy: actorFromReq(req) }
+  }, { new: true });
+  return updated || LeadReview.findById(reviewId);
+};
+
 module.exports.contactIntelligence = async function contactIntelligence(query = {}, req) {
   const requestedLeadId = cleanString(query.leadId || '');
   const hasRequestedLeadId = mongoose.isValidObjectId(requestedLeadId);
   const phone = normalizePhone(query.phone || query.telefono || query.whatsapp || '');
   const email = normalizeEmail(query.email || query.correo || '');
   const referenceId = cleanString(query.referenceId || query.companyId || query.accountId || query.id || '');
+  const leadScope = query.timelineScope === 'lead' && hasRequestedLeadId;
+  if (hasRequestedLeadId) await assertCanReadLead(requestedLeadId, req);
 
   if (!hasRequestedLeadId && !phone && !email && !referenceId) {
     return {
@@ -1272,13 +1332,12 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
 
   let leads = await Lead.find({
     businessUnit: { $in: allowedBusinessUnits(req.user) },
-    $or: leadMatch
+    $or: leadScope ? [{ _id: requestedLeadId }] : leadMatch
   })
     .sort({ createdAt: -1 })
-    .limit(20)
     .lean();
 
-  if (!canManageLeadInbox(req.user)) {
+  if (!canReadTeamLeads(req.user)) {
     leads = leads.filter((lead) =>
       String(lead.assignedAdvisorId || '') === String(req.user?.id || '') ||
       canAccessOwnManualLead(lead, req.user)
@@ -1299,21 +1358,22 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
     meetings,
     attachments
   ] = await Promise.all([
-    leadIds.length ? LeadEvent.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1 }).limit(40).lean() : [],
-    leadIds.length ? PriceSnapshot.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1 }).limit(20).lean() : [],
+    leadIds.length ? LeadEvent.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1, _id: -1 }).lean() : [],
+    leadIds.length ? PriceSnapshot.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1, _id: -1 }).lean() : [],
     CampaignRecord.find({
+      campaignId: { $in: await Campaign.distinct('_id', { businessUnit: { $in: allowedBusinessUnits(req.user) } }) },
       $or: [
         ...(leadIds.length ? [{ leadId: { $in: leadIds } }] : []),
-        ...(phone ? [{ 'detectedFields.phone': phone }] : []),
-        ...(email ? [{ 'detectedFields.email': email }] : [])
+        ...(!leadScope && phone ? [{ 'detectedFields.phone': phone }] : []),
+        ...(!leadScope && email ? [{ 'detectedFields.email': email }] : [])
       ]
-    }).sort({ createdAt: -1 }).limit(20).lean(),
-    leadIds.length ? CampaignQueue.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1 }).limit(20).lean() : [],
-    leadIds.length ? CommercialRequest.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1 }).limit(20).lean() : [],
-    leadIds.length ? Opportunity.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1 }).limit(20).lean() : [],
-    leadIds.length ? FollowUp.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1 }).limit(20).lean() : [],
-    leadIds.length ? Meeting.find({ leadId: { $in: leadIds } }).sort({ startsAt: -1 }).limit(20).lean() : [],
-    leadIdStrings.length ? Attachment.find({ entityType: 'lead', entityId: { $in: leadIdStrings } }).sort({ createdAt: -1 }).limit(80).lean() : []
+    }).sort({ createdAt: -1 }).lean(),
+    leadIds.length ? CampaignQueue.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1 }).lean() : [],
+    leadIds.length ? CommercialRequest.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1 }).lean() : [],
+    leadIds.length ? Opportunity.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1 }).lean() : [],
+    leadIds.length ? FollowUp.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1 }).lean() : [],
+    leadIds.length ? Meeting.find({ leadId: { $in: leadIds } }).sort({ startsAt: -1 }).lean() : [],
+    leadIdStrings.length ? Attachment.find({ entityType: 'lead', entityId: { $in: leadIdStrings } }).sort({ createdAt: -1 }).lean() : []
   ]);
 
   const attachmentsByLead = attachments.reduce((acc, file) => {
@@ -1360,9 +1420,6 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
       .map((followUp) => cleanString(followUp.metadata?.resolvedByEventId))
       .filter(Boolean)
   );
-  const leadsWithPriceSnapshots = new Set(
-    priceSnapshots.map((price) => String(price.leadId || '')).filter(Boolean)
-  );
   const timeline = [
     ...leads.map((lead) => ({
       type: 'lead',
@@ -1371,12 +1428,7 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
       leadId: String(lead._id),
       at: lead.createdAt
     })),
-    ...events
-      .filter((event) => !(
-        event.type === 'price_informed' &&
-        leadsWithPriceSnapshots.has(String(event.leadId || ''))
-      ))
-      .map((event) => {
+    ...events.map((event) => {
       const eventLead = leadById[String(event.leadId || '')] || {};
       const advisorName = cleanString(event.metadata?.assignedAdvisorName || eventLead.assignedAdvisorName);
       const advisorId = cleanString(event.metadata?.assignedAdvisorId || eventLead.assignedAdvisorId);
@@ -1401,7 +1453,13 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
             : 'contact';
       return {
         type: 'contact',
+        id: `event-${event._id}`,
         eventId: String(event._id || ''),
+        actor: event.actor || null,
+        eventType: event.type,
+        notes: event.notes || '',
+        previousStatus: event.metadata?.previousStatus || '',
+        nextStatus: event.metadata?.nextStatus || '',
         title: event.outcome === 'lead_discarded'
           ? 'Lead descartado'
           : isAssignment
@@ -1429,6 +1487,7 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
       };
     }),
     ...priceSnapshots.map((price) => ({
+      id: `price-${price._id}`,
       type: 'price',
       title: price.informed ? 'Precio informado' : 'Precio registrado',
       detail: priceLabel(price),
@@ -1439,6 +1498,7 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
     ...campaignRecords.map((record) => {
       const campaign = campaignById[String(record.campaignId || '')] || {};
       return {
+        id: `campaign-${record._id}`,
         type: 'campaign',
         title: campaign.name || campaign.code || 'Campaña',
         detail: `${operatorLabel(record.status) || '-'} · intentos: ${record.attempts || 0}`,
@@ -1446,7 +1506,21 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
         at: record.createdAt
       };
     }),
+    ...campaignRecords.flatMap((record) => (record.changeHistory || []).map((entry, index) => ({
+      id: `campaign-${record._id}-${index}`,
+      type: 'campaign_activity',
+      title: `Campaña · ${operatorLabel(entry.result || entry.fieldKey) || 'Gestión'}`,
+      detail: entry.note || '',
+      actor: { id: entry.actorId || '', name: entry.actorName || '' },
+      channel: entry.channel || '',
+      outcome: entry.result || '',
+      source: campaignById[String(record.campaignId || '')]?.name || 'Campaña',
+      leadId: String(record.leadId || ''),
+      nextAction: entry.nextAttemptAt ? { at: entry.nextAttemptAt, purpose: entry.note || '' } : null,
+      at: entry.changedAt || record.createdAt
+    }))),
     ...commercialRequests.map((request) => ({
+      id: `request-${request._id}`,
       type: 'request',
       title: request.subject || request.type || 'Solicitud comercial',
       detail: `${operatorLabel(request.status) || '-'} · ${request.description || ''}`,
@@ -1454,6 +1528,7 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
       at: request.createdAt
     })),
     ...opportunities.map((opportunity) => ({
+      id: `opportunity-${opportunity._id}`,
       type: 'opportunity',
       title: `Oportunidad ${operatorLabel(opportunity.stage)}`.trim(),
       detail: [opportunity.expectedValue, opportunity.currency, opportunity.nextStep].filter(Boolean).join(' · '),
@@ -1461,6 +1536,7 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
       at: opportunity.createdAt
     })),
     ...followUps.map((followUp) => {
+      const effectiveStatus = followUp.status === 'pending' && new Date(followUp.dueAt) < new Date() ? 'overdue' : followUp.status;
       const physical = ['meeting', 'visit', 'pickup'].includes(followUp.channel);
       const isReprogrammed = Boolean(
         followUp.metadata?.isReschedule ||
@@ -1471,35 +1547,53 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
         overdue: 'vencida',
         done: 'realizada',
         cancelled: 'cancelada'
-      }[followUp.status];
+      }[effectiveStatus];
       return {
+        id: `followup-${followUp._id}`,
         type: 'follow_up',
         title: physical
-          ? `${operatorLabel(followUp.channel)} ${physicalStatusLabel || operatorLabel(followUp.status)}`
-          : `Seguimiento ${operatorLabel(followUp.status)}`.trim(),
+          ? `${operatorLabel(followUp.channel)} ${physicalStatusLabel || operatorLabel(effectiveStatus)}`
+          : `Seguimiento ${operatorLabel(effectiveStatus)}`.trim(),
         detail: operatorLabel(followUp.reason),
+        note: followUp.metadata?.comment || '',
+        outcome: followUp.metadata?.result || '',
+        completedAt: followUp.completedAt || null,
+        scheduledAt: followUp.dueAt,
+        resolvedByEventId: followUp.metadata?.resolvedByEventId || '',
         followUpId: String(followUp._id || ''),
-        status: followUp.status,
+        status: effectiveStatus,
         channel: followUp.channel,
         movementCategory: physical
           ? followUp.status === 'cancelled' ? 'negative' : 'activity'
           : 'contact',
         participants: followUp.participants || [],
         leadId: String(followUp.leadId || ''),
-        at: followUp.dueAt || followUp.createdAt
+        at: followUp.completedAt || followUp.dueAt || followUp.createdAt
       };
     }),
     ...meetings.map((meeting) => ({
+      id: `meeting-${meeting._id}`,
       type: 'meeting',
       title: meeting.title || 'Reunión',
       detail: `${operatorLabel(meeting.status) || '-'} · ${operatorLabel(meeting.channel) || '-'}`,
+      note: meeting.result?.notes || '',
       leadId: String(meeting.leadId || ''),
-      at: meeting.startsAt || meeting.createdAt
+      at: meeting.result?.completedAt || meeting.startsAt || meeting.createdAt
     }))
   ]
     .filter((item) => !item.leadId || leadIdStrings.includes(String(item.leadId)))
-    .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0))
-    .slice(0, 30);
+    .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0) || String(a.id || a.leadId).localeCompare(String(b.id || b.leadId)));
+
+  const timelineBounds = dateBounds(query.timelineFrom, query.timelineTo);
+  const filteredTimeline = timeline.filter(item => {
+    const at = new Date(item.at).getTime();
+    return (!timelineBounds.$gte || at >= timelineBounds.$gte.getTime()) &&
+      (!timelineBounds.$lt || at < timelineBounds.$lt.getTime());
+  });
+  const timelinePaging = pagination({ page: query.timelinePage, limit: query.timelineLimit });
+  const timelineItems = query.timelineLimit
+    ? filteredTimeline.slice((timelinePaging.page - 1) * timelinePaging.limit, timelinePaging.page * timelinePaging.limit)
+    : filteredTimeline;
 
   const openStatuses = new Set(['new', 'queued', 'incomplete', 'assigned', 'contact_attempted', 'contacted', 'consultation', 'meeting_required', 'meeting_scheduled', 'meeting_completed', 'meeting_not_completed', 'visit_scheduled', 'visit_completed', 'visit_not_completed', 'pickup_scheduled', 'pickup_completed', 'pickup_not_completed', 'price_requested', 'price_informed', 'quote_created', 'quote_sent', 'opportunity']);
   const wonLeads = leads.filter((lead) => cleanString(lead.status).toLowerCase() === 'won');
@@ -1559,6 +1653,7 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
       observedAt: price.observedAt,
       suggestedPrice: price.suggestedPrice,
       informedPrice: price.informedPrice,
+      informed: Boolean(price.informed),
       currency: price.currency,
       unit: price.unit,
       notes: price.notes,
@@ -1566,7 +1661,15 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
       informedAt: price.informedAt,
       createdAt: price.createdAt
     })),
-    timeline,
+    agenda: followUps.map(item => ({
+      id: String(item._id), leadId: String(item.leadId), channel: item.channel,
+      reason: item.reason || '', status: item.status === 'pending' && new Date(item.dueAt) < new Date() ? 'overdue' : item.status,
+      dueAt: item.dueAt, completedAt: item.completedAt || null,
+      result: item.metadata?.result || '', comment: item.metadata?.comment || '',
+      resolvedByEventId: item.metadata?.resolvedByEventId || '', participants: item.participants || []
+    })),
+    timeline: timelineItems,
+    timelinePagination: { ...timelinePaging, total: filteredTimeline.length, pages: Math.ceil(filteredTimeline.length / timelinePaging.limit), paginated: Boolean(query.timelineLimit) },
     warnings
   };
 };
@@ -2406,6 +2509,7 @@ module.exports.adminDeleteLead = async function adminDeleteLead(leadId, payload 
   const [events, followUps, meetings, opportunities, prices, requests, policies, queue, files] =
     await Promise.all([
       LeadEvent.deleteMany({ leadId: lead._id }),
+      LeadReview.deleteMany({ leadId: lead._id }),
       FollowUp.deleteMany({ leadId: lead._id }),
       Meeting.deleteMany({ leadId: lead._id }),
       Opportunity.deleteMany({ leadId: lead._id }),
