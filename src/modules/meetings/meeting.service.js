@@ -9,6 +9,7 @@ const { actorFromReq } = require('../shared/schema.helpers');
 const { httpError } = require('../shared/errors');
 const { isAdminUser } = require('../../middlewares/auth.middleware');
 const { allowedBusinessUnits, hasBusinessUnitAccess } = require('../shared/leadLineAccess');
+const { assertFutureDate } = require('../shared/futureDate');
 
 module.exports = buildCrudService(Meeting, {
   buildFilter(query, { req }) {
@@ -37,6 +38,8 @@ module.exports = buildCrudService(Meeting, {
     });
   },
   async beforeCreate(payload, { req }) {
+    const startsAt = assertFutureDate(payload.startsAt);
+    if (payload.endsAt && new Date(payload.endsAt).getTime() <= startsAt.getTime()) throw httpError(400, 'La hora de finalización debe ser posterior al inicio');
     const lead = await Lead.findById(payload.leadId).lean();
     if (!lead) throw httpError(404, 'Lead no encontrado');
     if (!hasBusinessUnitAccess(req.user, lead.businessUnit)) {
@@ -83,6 +86,12 @@ module.exports = buildCrudService(Meeting, {
       item.advisorId === req.user.id ||
       (item.attendees || []).some((attendee) => attendee.personalId === req.user.id)
     );
+  },
+  beforeUpdate(payload, current) {
+    if (payload.startsAt && new Date(payload.startsAt).getTime() !== new Date(current.startsAt).getTime()) assertFutureDate(payload.startsAt);
+    if (payload.status === 'scheduled' && current.status !== 'scheduled') assertFutureDate(payload.startsAt || current.startsAt);
+    if ((payload.startsAt || payload.endsAt) && (payload.endsAt || current.endsAt) && new Date(payload.endsAt || current.endsAt).getTime() <= new Date(payload.startsAt || current.startsAt).getTime()) throw httpError(400, 'La hora de finalización debe ser posterior al inicio');
+    return payload;
   },
   async canWrite(item, { req }) {
     const lead = await Lead.findById(item.leadId).select('businessUnit').lean();

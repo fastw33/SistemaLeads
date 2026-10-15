@@ -9,8 +9,18 @@ const CampaignQueue = require('../campaignQueue/campaignQueue.model');
 const buildCrudService = require('../shared/crud.service');
 const { isAdminUser } = require('../../middlewares/auth.middleware');
 const { allowedBusinessUnits, hasBusinessUnitAccess } = require('../shared/leadLineAccess');
+const { assertFutureDate } = require('../shared/futureDate');
 
 const baseService = buildCrudService(FollowUp, {
+  beforeCreate(payload) {
+    assertFutureDate(payload.dueAt);
+    return payload;
+  },
+  beforeUpdate(payload, current) {
+    if (payload.dueAt && new Date(payload.dueAt).getTime() !== new Date(current.dueAt).getTime()) assertFutureDate(payload.dueAt);
+    if (payload.status === 'pending' && !['pending', 'overdue'].includes(current.status)) assertFutureDate(payload.dueAt || current.dueAt);
+    return payload;
+  },
   async buildFilter(query, { req }) {
     const filter = {};
     if (isAdminUser(req.user)) {

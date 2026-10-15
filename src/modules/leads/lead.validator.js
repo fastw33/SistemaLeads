@@ -2,6 +2,7 @@
 
 const { body, param } = require('express-validator');
 const { objectIdParam } = require('../shared/validators');
+const { validateFutureDate } = require('../shared/futureDate');
 const { BUSINESS_UNITS, SERVICE_LINES, LEAD_STATUSES } = require('../shared/business.constants');
 
 const validateCreate = [
@@ -32,10 +33,10 @@ const validateAction = [
   body('outcome').isString().trim().notEmpty().isLength({ max: 120 }),
   body('notes').optional().isString().trim().isLength({ max: 4000 }),
   body('nextStatus').optional().isIn(LEAD_STATUSES),
-  body('nextFollowUpAt').optional({ nullable: true, checkFalsy: true }).isISO8601(),
+  body('nextFollowUpAt').optional({ nullable: true, checkFalsy: true }).isISO8601().bail().custom(validateFutureDate),
   body('nextStep').optional().isString().trim().isLength({ max: 500 }),
   body('nextActionType').optional().isIn(['none', 'phone', 'whatsapp', 'email', 'meeting', 'visit', 'pickup']),
-  body('nextActionAt').optional({ nullable: true, checkFalsy: true }).isISO8601(),
+  body('nextActionAt').optional({ nullable: true, checkFalsy: true }).isISO8601().bail().custom(validateFutureDate),
   body('nextActionPurpose').optional().isString().trim().isLength({ max: 500 }),
   body('participants').optional().custom((value) => {
     let participants = value;

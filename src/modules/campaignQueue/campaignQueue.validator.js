@@ -2,6 +2,7 @@
 
 const { body, query } = require('express-validator');
 const { objectIdParam } = require('../shared/validators');
+const { validateFutureDate } = require('../shared/futureDate');
 
 const validateNext = [
   query('campaignId').optional().isMongoId().withMessage('campaignId invalido')
@@ -9,6 +10,7 @@ const validateNext = [
 
 const validateComplete = [
   objectIdParam(),
+  body('nextAttemptAt').optional({ nullable: true, checkFalsy: true }).isISO8601().bail().custom(validateFutureDate),
   body('outcome').isString().notEmpty(),
   body('channel').optional().isIn(['phone', 'whatsapp', 'email', 'meeting', 'task'])
 ];
@@ -26,7 +28,7 @@ const validateFinishEnrichment = [
   body('note').isString().trim().notEmpty().isLength({ max: 1000 }),
   body('nameFieldKey').optional({ nullable: true, checkFalsy: true }).isString().trim().isLength({ max: 240 }),
   body('nameValue').optional({ nullable: true, checkFalsy: true }).isString().trim().isLength({ max: 240 }),
-  body('nextAttemptAt').optional({ nullable: true, checkFalsy: true }).isISO8601()
+  body('nextAttemptAt').optional({ nullable: true, checkFalsy: true }).isISO8601().bail().custom(validateFutureDate)
 ];
 
 const validateResolveFollowUp = [

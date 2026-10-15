@@ -6,6 +6,7 @@ const Lead = require('./lead.model');
 const LeadEvent = require('../leadEvents/leadEvent.model');
 const LeadReview = require('./leadReview.model');
 const { dateBounds, pagination, trackingPipeline } = require('./leadTracking');
+const { assertFutureDate } = require('../shared/futureDate');
 const Attachment = require('../attachments/attachment.model');
 const Campaign = require('../campaigns/campaign.model');
 const CampaignRecord = require('../campaigns/campaignRecord.model');
@@ -1181,6 +1182,7 @@ const leadCrudService = buildCrudService(Lead, {
   },
 
   async beforeCreate(payload, { req }) {
+    if (payload.nextFollowUpAt) assertFutureDate(payload.nextFollowUpAt);
     const data = normalizeLead(payload);
     assertBusinessUnitAccess(req.user, data.businessUnit);
     data.code = await counterService.nextLeadCode(data.businessUnit);
@@ -1192,6 +1194,7 @@ const leadCrudService = buildCrudService(Lead, {
   },
 
   beforeUpdate(payload, current, { req }) {
+    if (payload.nextFollowUpAt && new Date(payload.nextFollowUpAt).getTime() !== new Date(current.nextFollowUpAt).getTime()) assertFutureDate(payload.nextFollowUpAt);
     assertBusinessUnitAccess(req.user, current.businessUnit);
     const data = normalizeLead(payload, current);
     assertBusinessUnitAccess(req.user, data.businessUnit);
@@ -1259,6 +1262,7 @@ module.exports.createReview = async function createReview(leadId, payload, req) 
   const note = cleanString(payload.note);
   const dueAt = new Date(payload.dueAt);
   if (!note || note.length > 4000 || Number.isNaN(dueAt.getTime())) throw httpError(400, 'Escribe la indicación y una fecha límite válida');
+  assertFutureDate(dueAt);
   return LeadReview.create({ leadId, note, dueAt, assignedAdvisorId: lead.assignedAdvisorId,
     assignedAdvisorName: lead.assignedAdvisorName || '', createdBy: actorFromReq(req) });
 };
@@ -1782,6 +1786,7 @@ module.exports.registerAction = async function registerAction(leadId, payload = 
   if (nextActionType !== 'none' && !nextActionAt) {
     throw httpError(400, 'Selecciona la fecha y hora de la próxima acción');
   }
+  if (nextActionType !== 'none') assertFutureDate(nextActionAt);
   const isClosingPhysicalActivity = isPhysicalActivity && hasActivityPerformed;
   const eventType = channel === 'phone'
     ? 'call'
@@ -2324,6 +2329,7 @@ module.exports.adminUpdateLead = async function adminUpdateLead(leadId, payload 
   lead.markModified('customFields');
 
   if (Object.prototype.hasOwnProperty.call(payload, 'nextFollowUpAt')) {
+    if (payload.nextFollowUpAt && new Date(payload.nextFollowUpAt).getTime() !== new Date(lead.nextFollowUpAt).getTime()) assertFutureDate(payload.nextFollowUpAt);
     lead.nextFollowUpAt = payload.nextFollowUpAt ? new Date(payload.nextFollowUpAt) : null;
   }
 

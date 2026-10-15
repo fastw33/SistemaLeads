@@ -10,6 +10,7 @@ const auditService = require('../audit/audit.service');
 const counterService = require('../counters/counter.service');
 const { actorFromReq } = require('../shared/schema.helpers');
 const { httpError } = require('../shared/errors');
+const { assertFutureDate } = require('../shared/futureDate');
 const { cleanString, inferDetectedFields, normalizePhone, normalizeEmail } = require('../../utils/normalize');
 const { allowedBusinessUnits, assertBusinessUnitAccess } = require('../shared/leadLineAccess');
 
@@ -312,6 +313,7 @@ async function enrich(queueId, payload, req) {
 }
 
 async function finishEnrichment(queueId, payload, req) {
+  if (payload.nextAttemptAt) assertFutureDate(payload.nextAttemptAt);
   const queueItem = await CampaignQueue.findById(queueId);
   if (!queueItem) throw httpError(404, 'Prospecto de campaña no encontrado');
   if (queueItem.assignedAdvisorId !== req.user.id) {
@@ -542,6 +544,7 @@ async function nextForAdvisor(req, filters = {}) {
 }
 
 async function complete(queueId, payload, req) {
+  if (payload.nextAttemptAt) assertFutureDate(payload.nextAttemptAt);
   const queueItem = await CampaignQueue.findById(queueId);
   if (!queueItem) throw httpError(404, 'Item de cola no encontrado');
   if (queueItem.assignedAdvisorId !== req.user.id) throw httpError(403, 'Este contacto no esta asignado a tu usuario');

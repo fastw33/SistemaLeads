@@ -2,11 +2,12 @@
 
 const { body } = require('express-validator');
 const { objectIdParam } = require('../shared/validators');
+const { validateFutureDate } = require('../shared/futureDate');
 
 const validateCreate = [
   body('leadId').isMongoId(),
   body('title').isString().notEmpty(),
-  body('startsAt').isISO8601(),
+  body('startsAt').isISO8601().bail().custom(validateFutureDate),
   body('endsAt').optional({ nullable: true, checkFalsy: true }).isISO8601(),
   body('channel').optional().isIn(['teams', 'meet', 'phone', 'presential', 'other']),
   body('meetingUrl').optional({ nullable: true, checkFalsy: true }).isURL(),

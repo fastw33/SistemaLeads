@@ -23,8 +23,8 @@ test('tracking pagination, history completeness and supervision against MongoDB'
     await db.collection('leads').insertMany(leads);
     await db.collection('leadevents').insertMany(Array.from({ length: 75 }, (_, index) => ({ _id: id(), leadId: selected._id, type: 'call', channel: 'phone', outcome: 'no_answer', notes: `${index}: ${comment}`, actor: { id: 'a-1', name: 'Asesor Uno' }, createdAt: new Date(now.getTime() - index * 60000) })));
     await db.collection('followups').insertMany([
-      { _id: id(), leadId: selected._id, channel: 'phone', status: 'pending', reason: 'Compromiso vencido', dueAt: new Date(now.getTime() - 86400000), createdAt: now },
-      { _id: id(), leadId: selected._id, channel: 'visit', status: 'done', reason: 'Visita programada', dueAt: new Date(now.getTime() - 86400000), completedAt: now, metadata: { comment: 'Resultado completo de visita', result: 'contacted' }, createdAt: now }
+      { _id: id(), leadId: selected._id, assignedAdvisorId: 'a-1', channel: 'phone', status: 'pending', reason: 'Compromiso vencido', dueAt: new Date(now.getTime() - 86400000), createdAt: now },
+      { _id: id(), leadId: selected._id, assignedAdvisorId: 'a-1', channel: 'visit', status: 'done', reason: 'Visita programada', dueAt: new Date(now.getTime() - 86400000), completedAt: now, metadata: { comment: 'Resultado completo de visita', result: 'contacted' }, createdAt: now }
     ]);
     await db.collection('campaigns').insertOne({ _id: campaignId, businessUnit: 'Harvest', name: 'Campaña vinculada' });
     await db.collection('campaignrecords').insertOne({ _id: id(), code: 'RECORD', campaignId, leadId: selected._id, status: 'worked', createdAt: now, changeHistory: [{ fieldKey: 'contact_result', result: 'contacted', note: 'Comentario anterior a la conversión', actorName: 'Asesor Uno', changedAt: now }] });
@@ -71,7 +71,7 @@ test('tracking pagination, history completeness and supervision against MongoDB'
       await assert.rejects(service.contactIntelligence({ leadId: String(selected._id) }, { user: { id: 'other', permisos: { leadsHarvest: true } } }), /No autorizado/);
     });
     await t.test('supervision instructions retain the original text and an accountable response', async () => {
-      const review = await service.createReview(String(selected._id), { note: 'Llamar y confirmar volumen', dueAt: now.toISOString() }, supervisor);
+      const review = await service.createReview(String(selected._id), { note: 'Llamar y confirmar volumen', dueAt: new Date(Date.now() + 3600000).toISOString() }, supervisor);
       const pending = await service.tracking({ attention: 'review' }, supervisor);
       assert.equal(pending.total, 1); assert.equal(pending.items[0].tracking.pendingReviews, 1);
       await assert.rejects(service.createReview(String(selected._id), { note: 'No autorizado', dueAt: now.toISOString() }, advisor), /No autorizado/);
@@ -80,6 +80,26 @@ test('tracking pagination, history completeness and supervision against MongoDB'
       const again = await service.resolveReview(String(selected._id), String(review._id), { resolution: 'Otro texto' }, supervisor);
       assert.equal(again.resolution, 'Se llamó; volumen confirmado.');
       assert.equal((await service.tracking({ attention: 'review' }, supervisor)).total, 0);
+    });
+    await t.test('rejects past next actions for every channel without recording any management', async () => {
+      const beforeEvents = await db.collection('leadevents').countDocuments({ leadId: selected._id });
+      const beforeFollowUps = await db.collection('followups').countDocuments({ leadId: selected._id });
+      const past = new Date(Date.now() - 60000).toISOString();
+      for (const channel of ['phone', 'whatsapp', 'email', 'meeting', 'visit', 'pickup']) {
+        await assert.rejects(service.registerAction(String(selected._id), {
+          channel, outcome: 'follow_up_required', nextActionType: channel, nextActionAt: past, nextActionPurpose: 'Prueba'
+        }, advisor), error => error.statusCode === 400 && /futuras/.test(error.message));
+      }
+      const followUps = require('../src/modules/followUps/followUp.service');
+      const meetings = require('../src/modules/meetings/meeting.service');
+      await assert.rejects(followUps.create({ leadId: selected._id, dueAt: past }, { req: advisor }), /futuras/);
+      await assert.rejects(meetings.create({ leadId: selected._id, startsAt: past }, { req: advisor }), /futuras/);
+      await assert.rejects(service.createReview(String(selected._id), { note: 'Indicación vencida', dueAt: past }, supervisor), /futuras/);
+      assert.equal(await db.collection('leadevents').countDocuments({ leadId: selected._id }), beforeEvents);
+      assert.equal(await db.collection('followups').countDocuments({ leadId: selected._id }), beforeFollowUps);
+      const overdue = await db.collection('followups').findOne({ leadId: selected._id, status: 'pending' });
+      const resolved = await followUps.update(String(overdue._id), { status: 'done' }, { req: { user: { ...advisor.user, permisos: { esAdmin: true } } } });
+      assert.equal(resolved.status, 'done', 'overdue existing activities can still be completed');
     });
   } finally {
     assert.ok(mongoose.connection.db.databaseName.startsWith('codex_tracking_test_'));
