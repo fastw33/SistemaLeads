@@ -11,6 +11,7 @@ const schema = new mongoose.Schema({
   status: { type: String, enum: ['pending', 'resolved'], default: 'pending' },
   createdBy: actorSchema,
   resolution: String,
+  resolutionType: { type: String, enum: ['response', 'lead_closed'], default: 'response' },
   resolvedAt: Date,
   resolvedBy: actorSchema
 }, { timestamps: true });

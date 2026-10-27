@@ -115,6 +115,7 @@ const validateAdminEventUpdate = [
 ];
 
 module.exports = {
+  validateSupervisionClose: [objectIdParam(), body('reason').isString().trim().isLength({ min: 5, max: 4000 })],
   validateEventId: [objectIdParam(), param('eventId').isMongoId()],
   validateReviewResolve: [objectIdParam(), param('reviewId').isMongoId()],
   validateCreate,

@@ -1261,7 +1261,35 @@ module.exports.pendingReviews = async function pendingReviews(query = {}, req) {
 
 module.exports.listReviews = async function listReviews(leadId, req) {
   await assertCanReadLead(leadId, req);
-  return LeadReview.find({ leadId }).sort({ createdAt: -1, _id: -1 }).lean();
+  const [reviews, files] = await Promise.all([
+    LeadReview.find({ leadId }).sort({ createdAt: -1, _id: -1 }).lean(),
+    Attachment.find({ entityType: 'lead', entityId: String(leadId), 'metadata.reviewId': { $exists: true } }).sort({ createdAt: 1 }).lean()
+  ]);
+  return reviews.map(review => ({ ...review, attachments: files.filter(file => String(file.metadata?.reviewId) === String(review._id)).map(briefAttachment) }));
+};
+
+async function saveReviewAttachments(lead, reviewId, files, req) {
+  const uploaded = await uploadLeadFiles({ files, leadId: lead._id, code: lead.code });
+  if (!uploaded.length) return [];
+  const attachments = await Attachment.insertMany(uploaded.map(file => ({
+    entityType: 'lead', entityId: String(lead._id), fileName: file.fileName,
+    mimeType: file.mimeType, size: file.size, storage: file.storage, path: file.path, url: file.url,
+    uploadedBy: actorFromReq(req),
+    metadata: { ...file.metadata, reviewId: String(reviewId), supervision: true }
+  })));
+  return attachments.map(briefAttachment);
+}
+
+module.exports.addReviewAttachments = async function addReviewAttachments(leadId, reviewId, req) {
+  const lead = await assertCanReadLead(leadId, req);
+  if (!canReadTeamLeads(req.user)) throw httpError(403, 'No autorizado para adjuntar evidencias de supervisión');
+  const review = await LeadReview.findOne({ _id: reviewId, leadId }).lean();
+  if (!review) throw httpError(404, 'Indicación no encontrada en este lead');
+  if (!req.files?.length) throw httpError(400, 'Selecciona al menos un archivo');
+  const attachments = await saveReviewAttachments(lead, review._id, req.files, req);
+  await auditService.record(req, { action: 'lead.review.attachments', entityType: 'lead', entityId: leadId,
+    after: { reviewId: String(review._id), attachmentIds: attachments.map(file => file.id) } });
+  return { attachments };
 };
 
 module.exports.createReview = async function createReview(leadId, payload, req) {
@@ -1272,10 +1300,47 @@ module.exports.createReview = async function createReview(leadId, payload, req) 
   const dueAt = new Date(payload.dueAt);
   if (!note || note.length > 4000 || Number.isNaN(dueAt.getTime())) throw httpError(400, 'Escribe la indicación y una fecha límite válida');
   assertFutureDate(dueAt);
+  if (['won', 'lost', 'discarded', 'do_not_contact', 'purchase_completed'].includes(lead.status)) throw httpError(409, 'El lead ya está cerrado');
   const review = await LeadReview.create({ leadId, note, dueAt, assignedAdvisorId: lead.assignedAdvisorId,
     assignedAdvisorName: lead.assignedAdvisorName || '', createdBy: actorFromReq(req) });
+  let attachments;
+  try { attachments = await saveReviewAttachments(lead, review._id, req.files || [], req); }
+  catch (error) { await LeadReview.deleteOne({ _id: review._id }); throw error; }
   await notifySupervisionReview({ lead, review, actor: actorFromReq(req), bearerToken: req.user?.token });
-  return review;
+  return { ...review.toObject(), attachments };
+};
+
+module.exports.closeBySupervision = async function closeBySupervision(leadId, payload, req) {
+  const lead = await assertCanReadLead(leadId, req);
+  if (!canReadTeamLeads(req.user)) throw httpError(403, 'No autorizado para cerrar leads desde supervisión');
+  const reason = cleanString(payload.reason);
+  if (reason.length < 5 || reason.length > 4000) throw httpError(400, 'Escribe un motivo de cierre de 5 a 4000 caracteres');
+  const terminal = ['won', 'lost', 'discarded', 'do_not_contact', 'purchase_completed'];
+  if (terminal.includes(lead.status)) throw httpError(409, 'El lead ya está cerrado');
+  const at = new Date();
+  const actor = actorFromReq(req);
+  const closed = await Lead.findOneAndUpdate({ _id: lead._id, status: { $nin: terminal } }, { $set: {
+    status: 'lost', closedAt: at, closedReason: reason, nextFollowUpAt: null,
+    'customFields.nextStep': '', 'customFields.nextAction': { type: 'none', at: null, purpose: '', participants: [] },
+    'customFields.supervisionClosure': { at, actor, reason }
+  } }, { new: true });
+  if (!closed) throw httpError(409, 'El lead fue cerrado por otro usuario. Actualiza el expediente');
+  const event = await LeadEvent.create({
+    leadId: lead._id, type: 'status_change', channel: 'system', outcome: 'supervision_closed', notes: reason, actor,
+    metadata: { supervision: true, previousStatus: lead.status, nextStatus: 'lost' }
+  });
+  await FollowUp.updateMany({ leadId: lead._id, status: { $in: ['pending', 'overdue'] } }, { $set: {
+    status: 'cancelled', completedAt: at, 'metadata.resolvedByEventId': String(event._id),
+    'metadata.closedBySupervision': actor.id, 'metadata.comment': `Cierre por supervisión: ${reason}`
+  } });
+  await closeScheduledMeetings(lead._id, { outcome: 'closed_by_supervision', notes: reason, completedAt: at });
+  await LeadReview.updateMany({ leadId: lead._id, status: 'pending' }, { $set: {
+    status: 'resolved', resolutionType: 'lead_closed', resolution: `Lead cerrado por supervisión. Motivo: ${reason}`,
+    resolvedAt: at, resolvedBy: actor
+  } });
+  await auditService.record(req, { action: 'lead.supervision.close', entityType: 'lead', entityId: lead._id,
+    before: { status: lead.status }, after: { status: closed.status, closedReason: reason, eventId: String(event._id) } });
+  return { lead: await enrichLeadData(closed.toObject()), event: event.toObject() };
 };
 
 module.exports.resolveReview = async function resolveReview(leadId, reviewId, payload, req) {
@@ -1470,7 +1535,7 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
             ? 'positive'
             : 'contact';
       return {
-        type: 'contact',
+        type: event.outcome === 'supervision_closed' ? 'supervision_closure' : 'contact',
         id: `event-${event._id}`,
         eventId: String(event._id || ''),
         actor: event.actor || null,
@@ -1478,7 +1543,7 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
         notes: event.notes || '',
         previousStatus: event.metadata?.previousStatus || '',
         nextStatus: event.metadata?.nextStatus || '',
-        title: event.outcome === 'lead_discarded'
+        title: event.outcome === 'supervision_closed' ? 'Supervisión · Lead cerrado' : event.outcome === 'lead_discarded'
           ? 'Lead descartado'
           : isAssignment
             ? `Asignado a ${advisorName || 'asesor sin nombre'}`
@@ -1740,6 +1805,9 @@ module.exports.addEventAttachments = async function addEventAttachments(leadId, 
   }
   const event = await LeadEvent.findOne({ _id: eventId, leadId: lead._id }).lean();
   if (!event) throw httpError(404, 'Gestión no encontrada en este lead');
+  if (event.metadata?.supervision && !canReadTeamLeads(req.user)) {
+    throw httpError(403, 'Solo supervisión puede adjuntar evidencias a este movimiento');
+  }
   if (!req.files?.length) throw httpError(400, 'Selecciona al menos un archivo');
 
   const uploaded = await uploadLeadFiles({ files: req.files, leadId: lead._id, code: lead.code });
@@ -1783,6 +1851,9 @@ module.exports.registerAction = async function registerAction(leadId, payload = 
   }
 
   const channel = cleanString(payload.channel).toLowerCase();
+  if (lead.customFields?.supervisionClosure && ['lost', 'discarded', 'do_not_contact', 'won', 'purchase_completed'].includes(lead.status)) {
+    throw httpError(409, 'Este lead fue cerrado por supervisión. Debe reabrirse antes de registrar otra gestión');
+  }
   const physicalChannels = ['meeting', 'visit', 'pickup'];
   const isPhysicalActivity = physicalChannels.includes(channel);
   const outcome = cleanString(payload.outcome);

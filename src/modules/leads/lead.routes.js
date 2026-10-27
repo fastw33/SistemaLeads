@@ -76,7 +76,9 @@ router.post('/:id/discard', validator.validateDiscard, validate, controller.disc
 router.post('/:id/actions', upload.any(), validator.validateAction, validate, controller.registerAction);
 router.post('/:id/events/:eventId/attachments', validator.validateEventId, validate, upload.array('files'), controller.addEventAttachments);
 router.get('/:id/reviews', validator.validateId, validate, controller.listReviews);
-router.post('/:id/reviews', validator.validateId, validate, controller.createReview);
+router.post('/:id/reviews', validator.validateId, validate, upload.array('files'), controller.createReview);
+router.post('/:id/reviews/:reviewId/attachments', validator.validateReviewResolve, validate, upload.array('files'), controller.addReviewAttachments);
+router.post('/:id/supervision/close', validator.validateSupervisionClose, validate, controller.closeBySupervision);
 router.patch('/:id/reviews/:reviewId/resolve', validator.validateReviewResolve, validate, controller.resolveReview);
 router.get('/:id', validator.validateId, validate, controller.getById);
 router.post('/', validator.validateCreate, validate, controller.create);

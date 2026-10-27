@@ -4,14 +4,14 @@ function supervisionTimeline(reviews = []) {
   return reviews.flatMap(review => {
     const common = {
       leadId: String(review.leadId), reviewId: String(review._id),
-      source: 'Supervisión', status: review.status, dueAt: review.dueAt
+      source: 'Supervisión', status: review.status, dueAt: review.dueAt, resolutionType: review.resolutionType || 'response'
     };
     const entries = [{
       ...common, id: `supervision-${review._id}`, type: 'supervision',
       title: 'Supervisión · Indicación', detail: review.note,
       actor: review.createdBy || null, at: review.createdAt
     }];
-    if (review.status === 'resolved' && review.resolvedAt) entries.push({
+    if (review.status === 'resolved' && review.resolvedAt && review.resolutionType !== 'lead_closed') entries.push({
       ...common, id: `supervision-response-${review._id}`, type: 'supervision_response',
       title: 'Supervisión · Respuesta del asesor', detail: review.resolution || '',
       note: review.note, actor: review.resolvedBy || null, at: review.resolvedAt
