@@ -46,3 +46,12 @@ src/
 - Asesores no listan base completa.
 - Acciones sensibles en `auditLogs`.
 - Catálogos, campañas, reglas y auditoría protegidos para admin.
+
+## Evidencias por gestión
+
+- `POST /api/leads/:id/actions`: admite `multipart/form-data` con varios archivos en `files`, junto a los campos de la gestión. Los participantes se envían como JSON.
+- `POST /api/leads/:id/events/:eventId/attachments`: agrega archivos a una gestión existente usando `multipart/form-data` con `files`. Conserva los comentarios, el resultado y el estado del lead.
+- Requiere acceso a la línea comercial y permiso para gestionar el lead. La gestión debe pertenecer al lead indicado. Los archivos se descargan mediante el endpoint autenticado existente.
+- Almacenamiento: utiliza la configuración S3 existente. Cada archivo conserva `metadata.eventId` y el usuario que lo adjuntó; las cargas posteriores quedan en auditoría.
+- Límites por envío: `LEADS_MAX_FILES` (10) y `LEADS_MAX_FILE_SIZE_MB` (20 MB por archivo). Si se cambian, configurar también `VITE_LEADS_MAX_FILES` y `VITE_LEADS_MAX_FILE_SIZE_MB` en FrontWms.
+- En Mis leads, usar **Registrar gestión** para adjuntar fotos y documentos al guardar, o **Historial → Agregar evidencias** para completar una gestión anterior. También se admiten adjuntos al registrar resultados de actividades en Agenda.

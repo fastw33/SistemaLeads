@@ -73,6 +73,7 @@ router.delete('/:id/admin', requirePermission('esAdmin'), validator.validateAdmi
 router.post('/:id/assign', validator.validateAssign, validate, controller.assign);
 router.post('/:id/discard', validator.validateDiscard, validate, controller.discard);
 router.post('/:id/actions', upload.any(), validator.validateAction, validate, controller.registerAction);
+router.post('/:id/events/:eventId/attachments', validator.validateEventId, validate, upload.array('files'), controller.addEventAttachments);
 router.get('/:id/reviews', validator.validateId, validate, controller.listReviews);
 router.post('/:id/reviews', validator.validateId, validate, controller.createReview);
 router.patch('/:id/reviews/:reviewId/resolve', validator.validateReviewResolve, validate, controller.resolveReview);

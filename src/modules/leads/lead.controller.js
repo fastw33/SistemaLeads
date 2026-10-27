@@ -55,6 +55,11 @@ module.exports = {
     res.status(201).json(data);
   }),
 
+  addEventAttachments: asyncHandler(async (req, res) => {
+    const data = await service.addEventAttachments(req.params.id, req.params.eventId, req);
+    res.status(201).json(data);
+  }),
+
   registerLotOperation: asyncHandler(async (req, res) => {
     const data = await service.registerLotOperation(req.body, req);
     res.json(data);

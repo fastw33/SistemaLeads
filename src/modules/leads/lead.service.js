@@ -1717,6 +1717,49 @@ module.exports.createEvent = async function createEvent(leadId, payload, req) {
   return event.toObject();
 };
 
+module.exports.addEventAttachments = async function addEventAttachments(leadId, eventId, req) {
+  const lead = await Lead.findById(leadId);
+  if (!lead) throw httpError(404, 'Lead no encontrado');
+  assertBusinessUnitAccess(req.user, lead.businessUnit);
+  if (!canWriteLead(lead, req.user)) {
+    throw httpError(403, 'No autorizado para gestionar este lead');
+  }
+  const event = await LeadEvent.findOne({ _id: eventId, leadId: lead._id }).lean();
+  if (!event) throw httpError(404, 'Gestión no encontrada en este lead');
+  if (!req.files?.length) throw httpError(400, 'Selecciona al menos un archivo');
+
+  const uploaded = await uploadLeadFiles({ files: req.files, leadId: lead._id, code: lead.code });
+  const attachments = await Attachment.insertMany(uploaded.map(file => ({
+    entityType: 'lead',
+    entityId: String(lead._id),
+    fileName: file.fileName,
+    mimeType: file.mimeType,
+    size: file.size,
+    storage: file.storage,
+    path: file.path,
+    url: file.url,
+    uploadedBy: actorFromReq(req),
+    metadata: {
+      ...file.metadata,
+      eventId: String(event._id),
+      activityType: event.channel,
+      outcome: event.outcome,
+      addedAfterEvent: true
+    }
+  })));
+  // Increment atomically so simultaneous uploads preserve the total.
+  await LeadEvent.updateOne({ _id: event._id }, {
+    $inc: { 'metadata.attachmentCount': attachments.length }
+  });
+  await auditService.record(req, {
+    action: 'lead.event.attachments',
+    entityType: 'lead',
+    entityId: lead._id,
+    after: { eventId: String(event._id), attachmentIds: attachments.map(file => String(file._id)) }
+  });
+  return { attachments: attachments.map(briefAttachment) };
+};
+
 module.exports.registerAction = async function registerAction(leadId, payload = {}, req) {
   const lead = await Lead.findById(leadId);
   if (!lead) throw httpError(404, 'Lead no encontrado');
