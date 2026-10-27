@@ -62,6 +62,7 @@ router.post(
 
 router.get('/', controller.list);
 router.get('/tracking', controller.tracking);
+router.get('/reviews/pending', controller.pendingReviews);
 router.get('/intelligence', controller.contactIntelligence);
 router.get('/attachments/:attachmentId/download', controller.downloadAttachment);
 router.post('/manual', upload.any(), controller.createManual);

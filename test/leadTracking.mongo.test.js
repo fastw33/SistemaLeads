@@ -8,6 +8,7 @@ test('tracking pagination, history completeness and supervision against MongoDB'
   require('dotenv').config();
   const dbName = `codex_tracking_test_${Date.now()}_${process.pid}`;
   await mongoose.connect(process.env.MONGO_URI, { dbName, autoIndex: false, autoCreate: false, serverSelectionTimeoutMS: 10000 });
+  t.mock.method(require('../src/modules/notifications/leadNotification.service'), 'notifySupervisionReview', async () => ({ created: 0 }));
   const service = require('../src/modules/leads/lead.service');
   const db = mongoose.connection.db;
   const id = () => new mongoose.Types.ObjectId();
@@ -74,12 +75,27 @@ test('tracking pagination, history completeness and supervision against MongoDB'
       const review = await service.createReview(String(selected._id), { note: 'Llamar y confirmar volumen', dueAt: new Date(Date.now() + 3600000).toISOString() }, supervisor);
       const pending = await service.tracking({ attention: 'review' }, supervisor);
       assert.equal(pending.total, 1); assert.equal(pending.items[0].tracking.pendingReviews, 1);
+      const inbox = await service.pendingReviews({}, advisor);
+      assert.equal(inbox.total, 1); assert.equal(inbox.items[0].note, 'Llamar y confirmar volumen');
+      assert.equal(String(inbox.items[0].leadId), String(selected._id));
+      assert.equal((await service.pendingReviews({}, { user: { ...advisor.user, id: 'other' } })).total, 0);
+      assert.equal((await service.pendingReviews({}, { user: { ...advisor.user, permisos: { leadsFastway: true } } })).total, 0);
+      const history = await service.contactIntelligence({ leadId: String(selected._id), timelineScope: 'lead' }, advisor);
+      const instruction = history.timeline.find(item => item.reviewId === String(review._id));
+      assert.equal(instruction.type, 'supervision'); assert.equal(instruction.detail, review.note);
+      assert.equal(instruction.actor.id, supervisor.user.id);
       await assert.rejects(service.createReview(String(selected._id), { note: 'No autorizado', dueAt: now.toISOString() }, advisor), /No autorizado/);
       const resolved = await service.resolveReview(String(selected._id), String(review._id), { resolution: 'Se llamó; volumen confirmado.' }, advisor);
       assert.equal(resolved.status, 'resolved'); assert.equal(resolved.note, 'Llamar y confirmar volumen'); assert.equal(resolved.resolvedBy.id, 'a-1');
       const again = await service.resolveReview(String(selected._id), String(review._id), { resolution: 'Otro texto' }, supervisor);
       assert.equal(again.resolution, 'Se llamó; volumen confirmado.');
       assert.equal((await service.tracking({ attention: 'review' }, supervisor)).total, 0);
+      assert.equal((await service.pendingReviews({}, advisor)).total, 0);
+      const after = await service.contactIntelligence({ leadId: String(selected._id), timelineScope: 'lead' }, advisor);
+      const entries = after.timeline.filter(item => item.reviewId === String(review._id));
+      assert.equal(entries.length, 2);
+      assert.equal(entries.find(item => item.type === 'supervision').detail, review.note);
+      assert.equal(entries.find(item => item.type === 'supervision_response').detail, resolved.resolution);
     });
     await t.test('rejects past next actions for every channel without recording any management', async () => {
       const beforeEvents = await db.collection('leadevents').countDocuments({ leadId: selected._id });

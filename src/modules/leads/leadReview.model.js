@@ -16,4 +16,5 @@ const schema = new mongoose.Schema({
 }, { timestamps: true });
 schema.index({ leadId: 1, createdAt: -1 });
 schema.index({ leadId: 1, status: 1, dueAt: 1 });
+schema.index({ assignedAdvisorId: 1, status: 1, createdAt: -1 });
 module.exports = mongoose.model('LeadReview', schema);

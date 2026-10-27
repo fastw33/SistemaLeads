@@ -6,6 +6,7 @@ const Lead = require('./lead.model');
 const LeadEvent = require('../leadEvents/leadEvent.model');
 const LeadReview = require('./leadReview.model');
 const { dateBounds, pagination, trackingPipeline } = require('./leadTracking');
+const { supervisionTimeline, pendingReviewsPipeline } = require('./leadSupervision');
 const { assertFutureDate } = require('../shared/futureDate');
 const Attachment = require('../attachments/attachment.model');
 const Campaign = require('../campaigns/campaign.model');
@@ -34,7 +35,8 @@ const { sendLeadNotification } = require('./leadPublic.mailer');
 const {
   notifyAssignment,
   notifyCancelledFollowUp,
-  notifyScheduledFollowUp
+  notifyScheduledFollowUp,
+  notifySupervisionReview
 } = require('../notifications/leadNotification.service');
 const {
   cleanString,
@@ -1250,6 +1252,13 @@ module.exports.tracking = async function tracking(query = {}, req) {
   };
 };
 
+module.exports.pendingReviews = async function pendingReviews(query = {}, req) {
+  const { page, limit } = pagination(query);
+  const [result] = await LeadReview.aggregate(pendingReviewsPipeline(req.user.id, allowedBusinessUnits(req.user), { page, limit }));
+  const total = result?.total?.[0]?.count || 0;
+  return { items: result?.items || [], total, page, limit, pages: Math.ceil(total / limit) };
+};
+
 module.exports.listReviews = async function listReviews(leadId, req) {
   await assertCanReadLead(leadId, req);
   return LeadReview.find({ leadId }).sort({ createdAt: -1, _id: -1 }).lean();
@@ -1263,8 +1272,10 @@ module.exports.createReview = async function createReview(leadId, payload, req) 
   const dueAt = new Date(payload.dueAt);
   if (!note || note.length > 4000 || Number.isNaN(dueAt.getTime())) throw httpError(400, 'Escribe la indicación y una fecha límite válida');
   assertFutureDate(dueAt);
-  return LeadReview.create({ leadId, note, dueAt, assignedAdvisorId: lead.assignedAdvisorId,
+  const review = await LeadReview.create({ leadId, note, dueAt, assignedAdvisorId: lead.assignedAdvisorId,
     assignedAdvisorName: lead.assignedAdvisorName || '', createdBy: actorFromReq(req) });
+  await notifySupervisionReview({ lead, review, actor: actorFromReq(req), bearerToken: req.user?.token });
+  return review;
 };
 
 module.exports.resolveReview = async function resolveReview(leadId, reviewId, payload, req) {
@@ -1360,7 +1371,8 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
     opportunities,
     followUps,
     meetings,
-    attachments
+    attachments,
+    reviews
   ] = await Promise.all([
     leadIds.length ? LeadEvent.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1, _id: -1 }).lean() : [],
     leadIds.length ? PriceSnapshot.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1, _id: -1 }).lean() : [],
@@ -1377,7 +1389,8 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
     leadIds.length ? Opportunity.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1 }).lean() : [],
     leadIds.length ? FollowUp.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1 }).lean() : [],
     leadIds.length ? Meeting.find({ leadId: { $in: leadIds } }).sort({ startsAt: -1 }).lean() : [],
-    leadIdStrings.length ? Attachment.find({ entityType: 'lead', entityId: { $in: leadIdStrings } }).sort({ createdAt: -1 }).lean() : []
+    leadIdStrings.length ? Attachment.find({ entityType: 'lead', entityId: { $in: leadIdStrings } }).sort({ createdAt: -1 }).lean() : [],
+    leadIds.length ? LeadReview.find({ leadId: { $in: leadIds } }).sort({ createdAt: -1, _id: -1 }).lean() : []
   ]);
 
   const attachmentsByLead = attachments.reduce((acc, file) => {
@@ -1425,6 +1438,7 @@ module.exports.contactIntelligence = async function contactIntelligence(query = 
       .filter(Boolean)
   );
   const timeline = [
+    ...supervisionTimeline(reviews),
     ...leads.map((lead) => ({
       type: 'lead',
       title: `${operatorLeadId(lead)} creado`,

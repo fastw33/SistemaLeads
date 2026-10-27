@@ -55,3 +55,10 @@ src/
 - Almacenamiento: utiliza la configuración S3 existente. Cada archivo conserva `metadata.eventId` y el usuario que lo adjuntó; las cargas posteriores quedan en auditoría.
 - Límites por envío: `LEADS_MAX_FILES` (10) y `LEADS_MAX_FILE_SIZE_MB` (20 MB por archivo). Si se cambian, configurar también `VITE_LEADS_MAX_FILES` y `VITE_LEADS_MAX_FILE_SIZE_MB` en FrontWms.
 - En Mis leads, usar **Registrar gestión** para adjuntar fotos y documentos al guardar, o **Historial → Agregar evidencias** para completar una gestión anterior. También se admiten adjuntos al registrar resultados de actividades en Agenda.
+
+## Supervisión del asesor
+
+- `GET /api/leads/reviews/pending?page=1&limit=10`: devuelve las indicaciones pendientes del usuario autenticado, con paginación y total. Solo incluye sus leads actuales y sus líneas autorizadas.
+- Las indicaciones existentes y sus respuestas aparecen en `/api/leads/intelligence` como movimientos de supervisión, conservando fecha, autor y texto original. No cuentan como una gestión comercial del operador.
+- Al crear una indicación se avisa al responsable mediante la integración de notificaciones existente (`TAREAS_API_URL`). Si esta integración falla, la indicación permanece guardada y visible en Atención.
+- Atención muestra una campana con todas las pendientes y el expediente muestra un aviso para responder. Se actualizan cada 30 segundos mientras la página está visible, al volver a la ventana y al registrar una respuesta. Leer una indicación no la marca como resuelta.

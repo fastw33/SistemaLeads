@@ -8,6 +8,7 @@ module.exports = {
   ...buildCrudController(service, 'lead'),
 
   tracking: asyncHandler(async (req, res) => res.json(await service.tracking(req.query, req))),
+  pendingReviews: asyncHandler(async (req, res) => res.json(await service.pendingReviews(req.query, req))),
   listReviews: asyncHandler(async (req, res) => res.json(await service.listReviews(req.params.id, req))),
   createReview: asyncHandler(async (req, res) => res.status(201).json(await service.createReview(req.params.id, req.body, req))),
   resolveReview: asyncHandler(async (req, res) => res.json(await service.resolveReview(req.params.id, req.params.reviewId, req.body, req))),

@@ -215,7 +215,22 @@ async function notifyFollowUpReminder({ lead, followUp }) {
   });
 }
 
+async function notifySupervisionReview({ lead, review, actor = {}, bearerToken }) {
+  return safely('supervision_review', () => createNotification({
+    actor_id_personal: String(actor.id || 'hub-comercial'),
+    to_ids: [String(lead.assignedAdvisorId)],
+    type: 'comercial.supervision',
+    title: 'NUEVA NOTA DE SUPERVISIÓN',
+    body: `${lead.code || 'Lead'} · ${review.note}`,
+    target: leadTarget(lead),
+    meta: { prioridad: 'alta', requiereAtencion: true, leadId: String(lead._id), reviewId: String(review._id) },
+    dedupeKey: `lead:${lead._id}:review:${review._id}`,
+    dedupeWindowHours: 720
+  }, bearerToken));
+}
+
 module.exports = {
+  notifySupervisionReview,
   notifyAssignment,
   notifyScheduledFollowUp,
   notifyCancelledFollowUp,
