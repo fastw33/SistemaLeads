@@ -45,6 +45,68 @@ test('tracking pagination, history completeness and supervision against MongoDB'
       const closures = await service.tracking({ view: 'closures' }, supervisor);
       assert.equal(closures.items[0].status, 'discarded');
     });
+    await t.test('won, unsuccessful and discarded views have independent totals and preserve filters', async () => {
+      const fixtures = ['won', 'purchase_completed', 'lost', 'do_not_contact'].map((status, index) => ({
+        ...leads[0], _id: id(), code: `CLOSURE-${status}`, status,
+        assignedAdvisorId: index % 2 ? 'a-2' : 'a-1',
+        closedAt: new Date('2026-10-16T04:59:59Z')
+      }));
+      fixtures.push({ ...fixtures[0], _id: id(), businessUnit: 'Greenway' });
+      await db.collection('leads').insertMany(fixtures);
+      try {
+        const won = await service.tracking({ view: 'won', limit: 1 }, supervisor);
+        const second = await service.tracking({ view: 'won', limit: 1, page: 2 }, supervisor);
+        assert.equal(won.total, 2); assert.equal(won.pages, 2);
+        assert.deepEqual(new Set([...won.items, ...second.items].map(item => item.status)), new Set(['won', 'purchase_completed']));
+        assert.equal(won.views.won, 2); assert.equal(won.views.lost, 2); assert.equal(won.views.discarded, 1);
+        assert.equal(won.views.closures, 5); assert.equal(won.views.all, 143);
+        assert.equal(won.metrics.won, 2); assert.equal(won.metrics.unsuccessful, 0);
+        const lost = await service.tracking({ view: 'lost' }, supervisor);
+        assert.deepEqual(new Set(lost.items.map(item => item.status)), new Set(['lost', 'do_not_contact']));
+        assert.equal(lost.metrics.unsuccessful, 2); assert.equal(lost.metrics.discarded, 0);
+        const discarded = await service.tracking({ view: 'discarded' }, supervisor);
+        assert.equal(discarded.total, 1); assert.equal(discarded.metrics.unsuccessful, 0);
+        assert.equal(discarded.metrics.discarded, 1);
+        const combined = await service.tracking({ view: 'closures' }, supervisor);
+        assert.equal(combined.total, 5); assert.equal(combined.metrics.unsuccessful, 2);
+        assert.equal((await service.tracking({ view: 'lost', assignedAdvisorId: 'a-2' }, supervisor)).total, 1);
+        assert.equal((await service.tracking({ view: 'won', status: 'lost' }, supervisor)).total, 0);
+        assert.equal((await service.tracking({ view: 'won', dateField: 'closed', from: '2026-10-15', to: '2026-10-15' }, supervisor)).total, 2);
+        assert.equal((await service.tracking({ view: 'won', dateField: 'closed', from: '2026-10-16' }, supervisor)).total, 0);
+        assert.equal((await service.tracking({ view: 'won' }, advisor)).total, 1);
+      } finally {
+        await db.collection('leads').deleteMany({ _id: { $in: fixtures.map(item => item._id) } });
+      }
+    });
+    await t.test('column sorting applies before pagination and keeps missing dates last in both directions', async () => {
+      const first = await service.tracking({ sortBy: 'id', sortDirection: 'asc', limit: 100 }, supervisor);
+      const second = await service.tracking({ sortBy: 'id', sortDirection: 'asc', limit: 100, page: 2 }, supervisor);
+      assert.deepEqual([...first.items, ...second.items].map(item => item.code), Array.from({ length: 137 }, (_, index) => `TEST-${index}`));
+      const reverse = await service.tracking({ sortBy: 'id', sortDirection: 'desc', limit: 1 }, supervisor);
+      assert.equal(reverse.items[0].code, 'TEST-136');
+      const fixtures = [
+        { code: 'SORT-10', name: 'Carlos', status: 'opportunity', assignedAdvisorName: 'Zora', lastContactAt: new Date('2026-10-20'), customFields: { nextStep: 'Visitar', lastOperation: { operationType: 'lot', operationId: '10' } }, closedReason: 'Zeta', closedAt: new Date('2026-10-22') },
+        { code: 'SORT-2', name: 'Ana', status: 'quote_created', assignedAdvisorName: 'Ana', lastContactAt: new Date('2026-10-19'), customFields: { nextStep: 'Llamar' }, closedReason: 'Alfa', closedAt: new Date('2026-10-21') },
+        { code: 'SORT-1', name: 'Beatriz', status: 'contacted', assignedAdvisorName: 'Beatriz', customFields: { nextStep: 'Revisar' }, closedReason: 'Beta' }
+      ].map(item => ({ ...leads[0], lastContactAt: null, _id: id(), ...item }));
+      await db.collection('leads').insertMany(fixtures);
+      try {
+        const expected = { id: ['SORT-1', 'SORT-2', 'SORT-10'], lead: ['SORT-2', 'SORT-1', 'SORT-10'], advisor: ['SORT-2', 'SORT-1', 'SORT-10'], status: ['SORT-1', 'SORT-2', 'SORT-10'], managedAt: ['SORT-2', 'SORT-10', 'SORT-1'], closedAt: ['SORT-2', 'SORT-10', 'SORT-1'], nextStep: ['SORT-2', 'SORT-1', 'SORT-10'], closureDetail: ['SORT-2', 'SORT-1', 'SORT-10'] };
+        for (const [sortBy, codes] of Object.entries(expected)) {
+          const asc = await service.tracking({ q: 'SORT-', view: 'all', sortBy, sortDirection: 'asc', limit: 2 }, supervisor);
+          const ascNext = await service.tracking({ q: 'SORT-', view: 'all', sortBy, sortDirection: 'asc', limit: 2, page: 2 }, supervisor);
+          assert.deepEqual([...asc.items, ...ascNext.items].map(item => item.code), codes, sortBy);
+          const desc = await service.tracking({ q: 'SORT-', view: 'all', sortBy, sortDirection: 'desc' }, supervisor);
+          const descending = ['managedAt', 'closedAt'].includes(sortBy) ? [codes[1], codes[0], codes[2]] : [...codes].reverse();
+          assert.deepEqual(desc.items.map(item => item.code), descending, `${sortBy} descending`);
+          assert.ok(desc.items.every(item => !('_sortValue' in item) && !('_sortMissing' in item)));
+        }
+        await assert.rejects(service.tracking({ sortBy: '$where' }, supervisor), /Columna de orden inválida/);
+        await assert.rejects(service.tracking({ sortBy: 'id', sortDirection: 'bad' }, supervisor), /Dirección de orden inválida/);
+      } finally {
+        await db.collection('leads').deleteMany({ _id: { $in: fixtures.map(item => item._id) } });
+      }
+    });
     await t.test('date filters and overdue classification apply before pagination', async () => {
       const dates = await service.tracking({ from: '2026-10-15', to: '2026-10-15', limit: 25 }, supervisor);
       assert.equal(dates.total, 137); assert.equal(dates.items.length, 25);

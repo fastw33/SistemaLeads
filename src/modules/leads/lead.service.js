@@ -1239,15 +1239,17 @@ module.exports.tracking = async function tracking(query = {}, req) {
     const searchFilter = { $or: ['code', 'name', 'companyName', 'phones.normalized', 'emails.normalized'].map(field => ({ [field]: { $regex: search, $options: 'i' } })) };
     filter.$and = [...(filter.$and || []), searchFilter];
   }
-  const [result] = await Lead.aggregate(trackingPipeline(filter, query));
+  const [result] = await Lead.aggregate(trackingPipeline(filter, query)).collation({ locale: 'es', numericOrdering: true });
   const { page, limit } = pagination(query);
   const total = result?.total?.[0]?.total || 0;
   const views = Object.fromEntries((result?.views || []).map(item => [item._id, item.total]));
   views.all = Object.values(views).reduce((sum, count) => sum + count, 0);
+  // Keep the combined view available to older clients without double-counting it in "all".
+  views.closures = (views.won || 0) + (views.lost || 0) + (views.discarded || 0);
   const metrics = Object.fromEntries((result?.metrics || []).map(item => [item._id, item.total]));
   return {
     items: result?.items || [], total, page, limit, pages: Math.ceil(total / limit), views,
-    metrics: { ...metrics, total, won: result?.closures?.[0]?.won || 0, operations: result?.closures?.[0]?.operations || 0 },
+    metrics: { ...metrics, total, won: result?.closures?.[0]?.won || 0, unsuccessful: result?.closures?.[0]?.unsuccessful || 0, discarded: result?.closures?.[0]?.discarded || 0, operations: result?.closures?.[0]?.operations || 0 },
     advisors: (result?.advisors || []).map(item => ({ id: item._id || 'unassigned', name: item.name || (item._id ? item._id : 'Sin asesor') }))
   };
 };
