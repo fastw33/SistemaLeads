@@ -135,7 +135,10 @@ async function uploadLeadFiles({ files = [], leadId, code }) {
         Metadata: {
           entity: 'lead',
           leadId: String(leadId || ''),
-          originalName: cleanString(file.originalname).slice(0, 250),
+          // S3 signs HTTP header bytes. Non-ASCII names can change those bytes
+          // in transit and trigger SignatureDoesNotMatch. Keep the full name
+          // in the attachment record below, and send only ASCII to S3.
+          originalName: sanitizeFileName(file.originalname),
           optimized: String(prepared.optimized),
         },
       })
